@@ -35,6 +35,22 @@ Use SSE for chat answer streaming. The client sends a normal request to submit a
 
 V1 should avoid GraphQL and WebSocket unless bidirectional real-time behavior becomes necessary later.
 
+Initial implemented endpoints:
+
+- `POST /api/auth/bootstrap`: create the first admin when no users exist.
+- `POST /api/auth/login`: exchange username/password for a JWT.
+- `GET /api/me`: return the authenticated user.
+- `GET /api/admin/users`: list users; admin only.
+- `POST /api/admin/users`: create users; admin only.
+- `GET /api/knowledge-bases`: list visible knowledge bases.
+- `POST /api/knowledge-bases`: create a knowledge base; admin only.
+- `POST /api/knowledge-bases/{id}/members`: assign a user to a knowledge base; admin only.
+- `GET /api/knowledge-bases/{id}/documents`: list documents in an accessible knowledge base.
+- `POST /api/knowledge-bases/{id}/documents`: upload a document to an accessible knowledge base and queue processing.
+- `GET /api/provider-settings`: read masked provider settings; admin only.
+- `PUT /api/provider-settings`: update provider settings; admin only.
+- `POST /api/chat/stream`: stream a chat answer with final citations; authenticated users.
+
 ## Model Provider Settings
 
 Admins configure two provider slots:
@@ -46,7 +62,7 @@ Each slot can be configured as `local` or `cloud`, with provider settings stored
 
 V1 should not support per-user provider selection.
 
-The first provider contract should use OpenAI-compatible API shapes for chat and embeddings, so cloud providers and local llama.cpp-compatible servers can share the same integration path.
+The first provider contract should use Eino's OpenAI-compatible chat and embedding components, so cloud providers and local llama.cpp-compatible servers can share the same integration path while the application keeps narrow provider interfaces of its own.
 
 Provider API keys may be stored in SQLite for v1 local deployment convenience. API responses should not return raw keys after saving; the settings UI should show masked values and allow replacement. This should be documented as local configuration storage, not enterprise-grade secret management.
 

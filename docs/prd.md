@@ -163,7 +163,7 @@ The required product experience is:
 - API keys may be stored in SQLite for v1 local deployment convenience.
 - API responses must not return raw provider API keys after saving.
 - The settings UI shows masked provider keys and allows replacement.
-- The first provider contract uses OpenAI-compatible chat and embedding API shapes.
+- The first provider contract uses Eino's OpenAI-compatible chat and embedding components behind the application's own narrow provider interfaces.
 - Local offline providers are expected to use llama.cpp-compatible containers for chat and embeddings.
 - Embedding chunks store provider ID/name, model name, vector dimension, and embedding status.
 - When the active embedding provider changes, affected chunks are marked stale or needing re-embedding.
@@ -249,4 +249,3 @@ The required product experience is:
 - Evaluation metrics cover import/indexing, storage/runtime, retrieval quality, citation quality, and user-facing latency.
 - Evaluation results must state whether they used fully local embedding/chat, local embedding with cloud chat, cloud embedding with local chat, or fully cloud providers.
 - The minimum successful demo is: Docker Compose starts the system; admin logs in; admin creates a knowledge base and user; user uploads a native PDF and an image/scanned document; system indexes them; user asks at least two questions; every answer has citations; user deletes or replaces a document; system updates the index; health page shows local service status; evaluation report includes timing and citation metrics.
-
