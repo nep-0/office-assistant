@@ -149,6 +149,7 @@ The required product experience is:
 - Historical citations are marked source-deleted or source-replaced when underlying sources change.
 - Citations store both references and snapshots: document/chunk IDs plus citation text preview and source metadata captured at answer time.
 - Retrieval is vector-first with `chromem-go`.
+- Retrieval is modeled as a model-callable tool, not a forced pre-generation step; the current spike uses a static retrieval tool triggered by the mock provider and production should replace it with a `chromem-go` backed tool exposed through Eino tool-calling.
 - Reranking is optional and belongs to evaluation or optimization, not required v1 behavior.
 - Keyword/hybrid retrieval is optional for experiments or fallback.
 - Multi-round factual questions build a retrieval query from the current question plus recent turns or a short conversation summary.

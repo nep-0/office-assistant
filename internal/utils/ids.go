@@ -1,4 +1,4 @@
-package server
+package utils
 
 import (
 	"crypto/rand"
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func newID(prefix string) string {
+func NewID(prefix string) string {
 	var bytes [8]byte
 	if _, err := rand.Read(bytes[:]); err != nil {
 		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())

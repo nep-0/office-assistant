@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,10 +16,17 @@ import (
 )
 
 func main() {
-	cfg := config.FromEnv()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	configPath := flag.String("config", config.PathFromEnv(), "path to JSON config file")
+	flag.Parse()
 
-	store, err := storage.Open(cfg.DatabasePath)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		slog.Error("load config", "error", err)
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
+
+	store, err := storage.Open(cfg.Storage.DatabasePath)
 	if err != nil {
 		logger.Error("open database", "error", err)
 		os.Exit(1)
@@ -33,20 +41,20 @@ func main() {
 	handler := server.New(server.Options{
 		Store:         store,
 		Logger:        logger,
-		JWTSecret:     cfg.JWTSecret,
-		UploadDir:     cfg.UploadDir,
-		MarkItDownURL: cfg.MarkItDownURL,
+		JWTSecret:     cfg.Security.JWTSecret,
+		UploadDir:     cfg.Storage.UploadDir,
+		MarkItDownURL: cfg.Services.MarkItDownURL,
 	})
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
+		Addr:              cfg.HTTP.Addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errs := make(chan error, 1)
 	go func() {
-		logger.Info("backend listening", "addr", cfg.HTTPAddr, "database", cfg.DatabasePath)
+		logger.Info("backend listening", "addr", cfg.HTTP.Addr, "database", cfg.Storage.DatabasePath, "config", *configPath)
 		errs <- srv.ListenAndServe()
 	}()
 

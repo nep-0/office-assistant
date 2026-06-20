@@ -39,7 +39,7 @@ func (p EinoOpenAICompatible) Embed(ctx context.Context, model string, text stri
 	return vectors[0], nil
 }
 
-func (p EinoOpenAICompatible) StreamChat(ctx context.Context, request ChatRequest, onToken func(string) error) error {
+func (p EinoOpenAICompatible) StreamChat(ctx context.Context, request ChatRequest, onEvent func(StreamEvent) error) error {
 	chatModel, err := einomodelopenai.NewChatModel(ctx, &einomodelopenai.ChatModelConfig{
 		APIKey:  apiKeyOrPlaceholder(p.APIKey),
 		BaseURL: p.BaseURL,
@@ -72,7 +72,7 @@ func (p EinoOpenAICompatible) StreamChat(ctx context.Context, request ChatReques
 		if chunk == nil || chunk.Content == "" {
 			continue
 		}
-		if err := onToken(chunk.Content); err != nil {
+		if err := onEvent(StreamEvent{Type: "token", Token: chunk.Content}); err != nil {
 			return err
 		}
 	}
@@ -119,7 +119,7 @@ type OpenAIChatProvider struct {
 	Model  string
 }
 
-func (p OpenAIChatProvider) Stream(ctx context.Context, request ChatRequest, onToken func(string) error) error {
+func (p OpenAIChatProvider) Stream(ctx context.Context, request ChatRequest, onEvent func(StreamEvent) error) error {
 	request.Model = p.Model
-	return p.Client.StreamChat(ctx, request, onToken)
+	return p.Client.StreamChat(ctx, request, onEvent)
 }

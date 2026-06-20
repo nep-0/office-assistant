@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"office-assistant/internal/provider"
 	"office-assistant/internal/storage"
 )
 
@@ -29,19 +28,6 @@ func (a *api) putProviderSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, storage.Masked(settings))
-}
-
-func buildChatProvider(slot storage.ProviderSlot) provider.ChatProvider {
-	if slot.Kind == "mock" || strings.TrimSpace(slot.BaseURL) == "" {
-		return provider.StaticChatProvider{}
-	}
-	return provider.OpenAIChatProvider{
-		Client: provider.EinoOpenAICompatible{
-			BaseURL: slot.BaseURL,
-			APIKey:  slot.APIKey,
-		},
-		Model: slot.Model,
-	}
 }
 
 func providerSummary(slot storage.ProviderSlot) map[string]string {

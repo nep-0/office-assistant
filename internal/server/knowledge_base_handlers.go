@@ -8,6 +8,7 @@ import (
 
 	"office-assistant/internal/auth"
 	"office-assistant/internal/storage"
+	"office-assistant/internal/utils"
 )
 
 type knowledgeBaseRequest struct {
@@ -26,7 +27,7 @@ func (a *api) createKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kb, err := a.store.CreateKnowledgeBase(r.Context(), storage.KnowledgeBase{
-		ID:        newID("kb"),
+		ID:        utils.NewID("kb"),
 		Name:      strings.TrimSpace(request.Name),
 		CreatedBy: claims.UserID,
 	})

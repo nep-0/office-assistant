@@ -7,12 +7,13 @@ type EmbeddingProvider interface {
 }
 
 type ChatProvider interface {
-	Stream(ctx context.Context, request ChatRequest, onToken func(string) error) error
+	Stream(ctx context.Context, request ChatRequest, onEvent func(StreamEvent) error) error
 }
 
 type ChatRequest struct {
 	Model    string
 	Messages []Message
+	Tools    []ToolSpec
 }
 
 type Message struct {
@@ -20,15 +21,49 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+type ToolSpec struct {
+	Name        string
+	Description string
+}
+
+type StreamEvent struct {
+	Type     string
+	Token    string
+	ToolCall *ToolCall
+}
+
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments map[string]any
+}
+
 type StaticChatProvider struct{}
 
-func (StaticChatProvider) Stream(ctx context.Context, request ChatRequest, onToken func(string) error) error {
+func (StaticChatProvider) Stream(ctx context.Context, request ChatRequest, onEvent func(StreamEvent) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := onEvent(StreamEvent{
+		Type: "tool_call",
+		ToolCall: &ToolCall{
+			ID:   "toolcall_static_retrieval",
+			Name: "retrieve",
+			Arguments: map[string]any{
+				"query": "",
+				"top_k": 5,
+			},
+		},
+	}); err != nil {
+		return err
+	}
+
 	answer := "Based on the provided source, the office assistant can answer questions from indexed documents and return citations."
 	for _, token := range splitWords(answer) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := onToken(token); err != nil {
+		if err := onEvent(StreamEvent{Type: "token", Token: token}); err != nil {
 			return err
 		}
 	}

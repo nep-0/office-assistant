@@ -1,0 +1,18 @@
+{
+  "http": {
+    "addr": ":8088"
+  },
+  "storage": {
+    "database_path": "data/office-assistant.db",
+    "upload_dir": "data/uploads"
+  },
+  "services": {
+    "markitdown_url": "http://localhost:8090"
+  },
+  "security": {
+    "jwt_secret": "change-this-dev-secret"
+  },
+  "observability": {
+    "log_level": "info"
+  }
+}

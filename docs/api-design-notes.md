@@ -66,6 +66,12 @@ The first provider contract should use Eino's OpenAI-compatible chat and embeddi
 
 Provider API keys may be stored in SQLite for v1 local deployment convenience. API responses should not return raw keys after saving; the settings UI should show masked values and allow replacement. This should be documented as local configuration storage, not enterprise-grade secret management.
 
+## Runtime Configuration
+
+The backend should load runtime configuration from a JSON file. The path can be passed with `-config` or through `OA_CONFIG`; if no path is provided, defaults are used for local development.
+
+The example file lives at `config/example.json` and covers HTTP bind address, SQLite path, upload directory, MarkItDown service URL, JWT secret, and log level.
+
 ## Embedding Provider Changes
 
 Chunks should store embedding metadata such as provider ID/name, model name, vector dimension, and embedding status. When the active embedding provider changes, existing chunks should be marked stale or needing re-embedding rather than marking only the whole knowledge base.
@@ -114,6 +120,12 @@ Citations should store both references and snapshots: document/chunk IDs for nav
 If retrieval does not find enough supporting information in the selected knowledge base, the assistant should say that it cannot find enough evidence and should not fabricate a factual answer. The UI may show closest retrieved chunks as possibly related sources only if they pass a loose threshold.
 
 Every factual answer should be grounded by citations.
+
+## Retrieval Tool
+
+Retrieval should be implemented as a model-callable tool, not as hidden HTTP handler logic or a forced pre-generation step. The tool input includes knowledge base ID, query text, optional recent messages, and top-k. The tool output is a list of chunks with source metadata for prompt grounding and citation snapshots.
+
+The current spike uses a deterministic static retrieval tool triggered by the mock provider's tool-call event. The production implementation should replace it with a `chromem-go` backed retrieval tool and expose the same capability through Eino tool-calling so the LLM can request retrieval explicitly. If the model does not request retrieval, no retrieval should run and no citations should be fabricated.
 
 ## Answer Prompt Policy
 

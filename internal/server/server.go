@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"office-assistant/internal/app"
 	"office-assistant/internal/auth"
 	"office-assistant/internal/document"
+	"office-assistant/internal/retrieval"
 	"office-assistant/internal/storage"
 )
 
@@ -39,14 +41,16 @@ type Options struct {
 	UploadDir     string
 	MarkItDownURL string
 	Processor     document.Processor
+	Retrieval     retrieval.Tool
 }
 
 type api struct {
 	store     Store
 	logger    *slog.Logger
 	tokens    *auth.Manager
-	uploadDir string
-	processor document.Processor
+	accounts  *app.AccountService
+	documents *app.DocumentService
+	chat      *app.ChatService
 }
 
 func New(options Options) http.Handler {
@@ -55,13 +59,20 @@ func New(options Options) http.Handler {
 		logger = slog.Default()
 	}
 
+	tokens := auth.NewManager(options.JWTSecret, 24*time.Hour)
 	api := &api{
-		store:     options.Store,
-		logger:    logger,
-		tokens:    auth.NewManager(options.JWTSecret, 24*time.Hour),
-		uploadDir: uploadDirOrDefault(options.UploadDir),
-		processor: processorOrDefault(options),
+		store:  options.Store,
+		logger: logger,
+		tokens: tokens,
 	}
+	api.accounts = app.NewAccountService(options.Store, tokens)
+	api.documents = app.NewDocumentService(app.DocumentServiceOptions{
+		Store:     options.Store,
+		Processor: processorOrDefault(options),
+		UploadDir: uploadDirOrDefault(options.UploadDir),
+		Logger:    logger,
+	})
+	api.chat = app.NewChatService(options.Store, retrievalOrDefault(options))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", api.health)
@@ -93,4 +104,11 @@ func processorOrDefault(options Options) document.Processor {
 		return options.Processor
 	}
 	return document.HTTPProcessor{BaseURL: options.MarkItDownURL}
+}
+
+func retrievalOrDefault(options Options) retrieval.Tool {
+	if options.Retrieval != nil {
+		return options.Retrieval
+	}
+	return retrieval.StaticTool{}
 }
