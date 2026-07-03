@@ -1,20 +1,28 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type app struct {
 	startedAt time.Time
 	config    config
+	store     *store
 }
 
 type config struct {
 	addr          string
+	databasePath  string
 	documentURL   string
 	ocrURL        string
 	fakeProviders bool
@@ -39,9 +47,16 @@ type dependencyStatus struct {
 
 func main() {
 	cfg := loadConfig()
+	store, err := openStore(cfg.databasePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+
 	a := &app{
 		startedAt: time.Now().UTC(),
 		config:    cfg,
+		store:     store,
 	}
 
 	mux := http.NewServeMux()
@@ -62,6 +77,7 @@ func main() {
 func loadConfig() config {
 	return config{
 		addr:          env("BACKEND_ADDR", ":8080"),
+		databasePath:  env("DATABASE_PATH", "/data/office-assistant.db"),
 		documentURL:   env("DOCUMENT_URL", "http://document:8081"),
 		ocrURL:        env("OCR_URL", "http://ocr:8082"),
 		fakeProviders: env("FAKE_PROVIDERS", "true") == "true",
@@ -71,6 +87,12 @@ func loadConfig() config {
 func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/ready", a.ready)
+	mux.HandleFunc("GET /api/setup/status", a.setupStatus)
+	mux.HandleFunc("POST /api/setup", a.createFirstAdmin)
+	mux.HandleFunc("POST /api/auth/login", a.login)
+	mux.HandleFunc("POST /api/auth/logout", a.logout)
+	mux.HandleFunc("GET /api/auth/me", a.me)
+	mux.HandleFunc("GET /api/admin/status", a.adminStatus)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }
@@ -120,6 +142,26 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+type apiError struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string, details map[string]any) {
+	writeJSON(w, status, apiError{
+		Code:    code,
+		Message: message,
+		Details: details,
+	})
+}
+
+func decodeJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -131,11 +173,36 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func openStore(path string) (*store, error) {
+	if path != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+
+	s := &store{db: db}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func notFound(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
 }

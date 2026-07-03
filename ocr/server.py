@@ -1,6 +1,8 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import signal
+import sys
 from datetime import datetime, timezone
 
 
@@ -32,5 +34,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(os.environ.get("OCR_PORT", "8082"))
     server = ThreadingHTTPServer(("", port), Handler)
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     print(f"ocr service listening on :{port}")
     server.serve_forever()

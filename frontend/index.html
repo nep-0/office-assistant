@@ -19,19 +19,36 @@
       </aside>
       <section class="workspace" aria-labelledby="page-title">
         <header>
-          <p class="eyebrow">Vertical skeleton</p>
-          <h1 id="page-title">System status</h1>
+          <p class="eyebrow">Local workspace</p>
+          <h1 id="page-title">Office Assistant</h1>
         </header>
-        <div class="status-grid">
+        <div class="status-grid" id="auth-grid">
           <section class="panel">
-            <h2>Backend</h2>
-            <p id="health-status">Checking health...</p>
+            <h2 id="auth-title">Account</h2>
+            <p id="auth-summary">Checking setup status...</p>
+            <form id="auth-form" class="form" hidden>
+              <label>
+                Username
+                <input id="username" name="username" autocomplete="username" required>
+              </label>
+              <label>
+                Password
+                <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" required>
+              </label>
+              <button type="submit" id="auth-submit">Continue</button>
+            </form>
+            <button type="button" id="logout-button" hidden>Log out</button>
+            <p id="auth-message" class="message" role="status"></p>
           </section>
           <section class="panel">
             <h2>Dependencies</h2>
             <ul id="dependency-list">
               <li>Checking readiness...</li>
             </ul>
+          </section>
+          <section class="panel">
+            <h2>Admin route</h2>
+            <p id="admin-status">Log in as an admin to verify protected access.</p>
           </section>
         </div>
       </section>
