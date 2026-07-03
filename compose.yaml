@@ -1,0 +1,47 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Containerfile
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Containerfile
+    environment:
+      BACKEND_ADDR: ":8080"
+      DOCUMENT_URL: "http://document:8081"
+      OCR_URL: "http://ocr:8082"
+      FAKE_PROVIDERS: "true"
+    depends_on:
+      - document
+      - ocr
+    volumes:
+      - backend-data:/data
+
+  document:
+    build:
+      context: .
+      dockerfile: document/Containerfile
+    environment:
+      DOCUMENT_PORT: "8081"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  ocr:
+    build:
+      context: .
+      dockerfile: ocr/Containerfile
+    environment:
+      OCR_PORT: "8082"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  backend-data:

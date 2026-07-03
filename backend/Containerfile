@@ -1,0 +1,12 @@
+FROM docker.io/library/golang:1.26-alpine AS build
+
+WORKDIR /src
+COPY go.mod ./
+COPY backend ./backend
+RUN go build -o /out/backend ./backend
+
+FROM docker.io/library/alpine:3.23
+
+COPY --from=build /out/backend /usr/local/bin/backend
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/backend"]

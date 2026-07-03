@@ -1,0 +1,5 @@
+FROM docker.io/library/caddy:2.11-alpine
+
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY frontend /srv
+EXPOSE 80

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Office Assistant</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">Office Assistant</div>
+        <nav aria-label="Primary">
+          <a href="/" aria-current="page">Status</a>
+          <a href="/">Knowledge Bases</a>
+          <a href="/">Documents</a>
+          <a href="/">Chat</a>
+        </nav>
+      </aside>
+      <section class="workspace" aria-labelledby="page-title">
+        <header>
+          <p class="eyebrow">Vertical skeleton</p>
+          <h1 id="page-title">System status</h1>
+        </header>
+        <div class="status-grid">
+          <section class="panel">
+            <h2>Backend</h2>
+            <p id="health-status">Checking health...</p>
+          </section>
+          <section class="panel">
+            <h2>Dependencies</h2>
+            <ul id="dependency-list">
+              <li>Checking readiness...</li>
+            </ul>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
