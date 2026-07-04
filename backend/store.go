@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -89,6 +90,33 @@ type documentChunk struct {
 	EmbeddingModel    string
 	IndexingStatus    string
 	CreatedAt         time.Time
+}
+
+type chatSession struct {
+	ID              string
+	UserID          int64
+	KnowledgeBaseID int64
+	Title           string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type chatMessage struct {
+	ID        int64
+	SessionID string
+	Role      string
+	Content   string
+	Metadata  string
+	CreatedAt time.Time
+}
+
+type retrievalChunk struct {
+	ChunkID          int64
+	DocumentID       int64
+	DocumentName     string
+	Content          string
+	HeadingPath      string
+	SourceAnchorJSON string
 }
 
 func (s *store) Close() error {
@@ -213,6 +241,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS document_search_fts USING fts5(
 	extracted_text,
 	tokenize='unicode61'
 );
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+	id TEXT PRIMARY KEY,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	knowledge_base_id INTEGER NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+	title TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS chat_sessions_user_idx ON chat_sessions(user_id);
+CREATE INDEX IF NOT EXISTS chat_sessions_knowledge_base_idx ON chat_sessions(knowledge_base_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+	role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'error')),
+	content TEXT NOT NULL,
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages(session_id, id);
 `)
 	if err != nil {
 		return err
@@ -853,6 +904,96 @@ ORDER BY document_chunks.id ASC
 	return chunks, rows.Err()
 }
 
+func (s *store) findRetrievalChunk(ctx context.Context, chunkID, knowledgeBaseID int64) (retrievalChunk, error) {
+	var chunk retrievalChunk
+	err := s.db.QueryRowContext(ctx, `
+SELECT document_chunks.id, documents.id, documents.display_name, document_chunks.content, document_chunks.heading_path, document_chunks.source_anchor_json
+FROM document_chunks
+JOIN documents ON documents.id = document_chunks.document_id
+JOIN knowledge_bases ON knowledge_bases.id = documents.knowledge_base_id
+JOIN document_versions ON document_versions.id = document_chunks.document_version_id
+WHERE document_chunks.id = ?
+	AND documents.knowledge_base_id = ?
+	AND document_chunks.indexing_status = 'indexed'
+	AND documents.deleted_at IS NULL
+	AND knowledge_bases.deleted_at IS NULL
+	AND document_versions.id = (
+		SELECT MAX(id)
+		FROM document_versions latest
+		WHERE latest.document_id = document_chunks.document_id
+	)
+`, chunkID, knowledgeBaseID).Scan(&chunk.ChunkID, &chunk.DocumentID, &chunk.DocumentName, &chunk.Content, &chunk.HeadingPath, &chunk.SourceAnchorJSON)
+	return chunk, err
+}
+
+func (s *store) createChatSession(ctx context.Context, session chatSession) (chatSession, error) {
+	if session.ID == "" {
+		return chatSession{}, errors.New("chat session id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO chat_sessions (id, user_id, knowledge_base_id, title)
+VALUES (?, ?, ?, ?)
+`, session.ID, session.UserID, session.KnowledgeBaseID, session.Title)
+	if err != nil {
+		return chatSession{}, err
+	}
+	return s.findChatSession(ctx, session.ID)
+}
+
+func (s *store) findChatSession(ctx context.Context, id string) (chatSession, error) {
+	return scanChatSession(s.db.QueryRowContext(ctx, `
+SELECT id, user_id, knowledge_base_id, title, created_at, updated_at
+FROM chat_sessions
+WHERE id = ?
+`, id))
+}
+
+func (s *store) appendChatMessage(ctx context.Context, msg chatMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO chat_messages (session_id, role, content, metadata_json)
+VALUES (?, ?, ?, ?)
+`, msg.SessionID, msg.Role, msg.Content, msg.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+UPDATE chat_sessions
+SET updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, msg.SessionID)
+	return err
+}
+
+func (s *store) listChatMessages(ctx context.Context, sessionID string, limit int) ([]chatMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, role, content, metadata_json, created_at
+FROM (
+	SELECT id, session_id, role, content, metadata_json, created_at
+	FROM chat_messages
+	WHERE session_id = ?
+	ORDER BY id DESC
+	LIMIT ?
+)
+ORDER BY id ASC
+`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []chatMessage
+	for rows.Next() {
+		msg, err := scanChatMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -986,6 +1127,40 @@ func scanDocumentChunk(row rowScanner) (documentChunk, error) {
 	}
 	chunk.CreatedAt = created
 	return chunk, nil
+}
+
+func scanChatSession(row rowScanner) (chatSession, error) {
+	var session chatSession
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(&session.ID, &session.UserID, &session.KnowledgeBaseID, &session.Title, &createdAt, &updatedAt); err != nil {
+		return chatSession{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return chatSession{}, err
+	}
+	updated, err := parseSQLiteTime(updatedAt)
+	if err != nil {
+		return chatSession{}, err
+	}
+	session.CreatedAt = created
+	session.UpdatedAt = updated
+	return session, nil
+}
+
+func scanChatMessage(row rowScanner) (chatMessage, error) {
+	var msg chatMessage
+	var createdAt string
+	if err := row.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.Metadata, &createdAt); err != nil {
+		return chatMessage{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return chatMessage{}, err
+	}
+	msg.CreatedAt = created
+	return msg, nil
 }
 
 func updateIngestionJobTx(ctx context.Context, tx *sql.Tx, id int64, status string, attempts int, code, message string) error {

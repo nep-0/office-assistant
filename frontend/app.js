@@ -2,6 +2,8 @@ const state = {
   needsSetup: false,
   user: null,
   selectedKnowledgeBaseId: null,
+  chatSessionId: null,
+  chatAbortController: null,
 };
 
 async function api(path, options = {}) {
@@ -129,14 +131,17 @@ async function loadKnowledgeBases() {
 
 async function loadDocuments() {
   const panel = document.querySelector("#document-panel");
+  const chatPanel = document.querySelector("#chat-panel");
   const list = document.querySelector("#document-list");
   const searchForm = document.querySelector("#document-search-form");
   if (!state.selectedKnowledgeBaseId) {
     panel.hidden = true;
+    chatPanel.hidden = true;
     list.replaceChildren();
     return;
   }
   panel.hidden = false;
+  chatPanel.hidden = false;
   try {
     const query = searchForm.elements.q.value.trim();
     const path = query
@@ -434,6 +439,21 @@ document.querySelector("#document-search-form").addEventListener("submit", async
   await loadDocuments();
 });
 
+document.querySelector("#chat-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await sendChatMessage(event.currentTarget);
+});
+
+document.querySelector("#chat-stop-button").addEventListener("click", async () => {
+  if (state.chatAbortController) {
+    state.chatAbortController.abort();
+  }
+  if (state.chatSessionId) {
+    await api(`/api/chat-sessions/${state.chatSessionId}/cancel`, { method: "POST", body: "{}" }).catch(() => ({}));
+  }
+  document.querySelector("#chat-stop-button").hidden = true;
+});
+
 async function uploadSelectedDocument(confirmDuplicate) {
   const form = document.querySelector("#document-upload-form");
   const message = document.querySelector("#document-message");
@@ -463,6 +483,87 @@ async function uploadSelectedDocument(confirmDuplicate) {
   message.textContent = "Uploaded.";
   document.querySelector("#markdown-preview").hidden = true;
   await loadDocuments();
+}
+
+async function sendChatMessage(form) {
+  if (!state.selectedKnowledgeBaseId) return;
+  const message = form.elements.message.value.trim();
+  if (!message) return;
+  const log = document.querySelector("#chat-log");
+  const status = document.querySelector("#chat-message");
+  const stopButton = document.querySelector("#chat-stop-button");
+  const userItem = document.createElement("div");
+  userItem.className = "chat-entry user";
+  userItem.textContent = message;
+  const assistantItem = document.createElement("div");
+  assistantItem.className = "chat-entry assistant";
+  log.append(userItem, assistantItem);
+  form.reset();
+  status.textContent = "";
+  stopButton.hidden = false;
+  state.chatAbortController = new AbortController();
+
+  try {
+    const response = await fetch(`/api/knowledge-bases/${state.selectedKnowledgeBaseId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.chatSessionId, message }),
+      signal: state.chatAbortController.signal,
+    });
+    if (!response.ok || !response.body) {
+      status.textContent = "Chat request failed.";
+      return;
+    }
+    await readChatStream(response.body, assistantItem, status);
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      status.textContent = error.message;
+    }
+  } finally {
+    state.chatAbortController = null;
+    stopButton.hidden = true;
+  }
+}
+
+async function readChatStream(body, assistantItem, status) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const raw = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      handleChatEvent(raw, assistantItem, status);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+}
+
+function handleChatEvent(raw, assistantItem, status) {
+  const lines = raw.split("\n");
+  const event = lines.find((line) => line.startsWith("event: "))?.slice(7).trim();
+  const dataLine = lines.find((line) => line.startsWith("data: "));
+  if (!event || !dataLine) return;
+  const payload = JSON.parse(dataLine.slice(6));
+  if (event === "start") {
+    state.chatSessionId = payload.session_id;
+  }
+  if (event === "retrieval") {
+    status.textContent = "Searching Knowledge Base...";
+  }
+  if (event === "delta") {
+    assistantItem.textContent += payload.text || "";
+  }
+  if (event === "citations") {
+    status.textContent = payload.citations?.length ? "Answer includes citations." : "";
+  }
+  if (event === "error") {
+    status.textContent = payload.message || "Chat failed.";
+  }
 }
 
 function formatBytes(bytes) {

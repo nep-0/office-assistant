@@ -121,12 +121,17 @@ label {
   gap: 6px;
 }
 
-input {
+input,
+textarea {
   border: 1px solid #bfccd9;
   border-radius: 6px;
   color: #17202a;
   font: inherit;
   padding: 10px 12px;
+}
+
+textarea {
+  resize: vertical;
 }
 
 button {
@@ -180,6 +185,38 @@ button:hover {
   border-top: 1px solid #d9e0e8;
   margin-top: 22px;
   padding-top: 18px;
+}
+
+.chat-panel {
+  border-top: 1px solid #d9e0e8;
+  margin-top: 22px;
+  padding-top: 18px;
+}
+
+.chat-log {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chat-entry {
+  border-left: 3px solid #bfccd9;
+  color: #253242;
+  line-height: 1.5;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+
+.chat-entry.user {
+  border-color: #1f6f8b;
+}
+
+.chat-entry.assistant {
+  border-color: #5a7d4f;
+}
+
+.chat-form {
+  margin-top: 14px;
 }
 
 .document-list {

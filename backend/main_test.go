@@ -621,6 +621,103 @@ func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = fakeDocumentClient(http.StatusOK, `{
+		"schema_version":"v0.fake",
+		"markdown":"# Policy\n\nRemote work requires manager approval.",
+		"metadata":{"kind":"fake"},
+		"warnings":[],
+		"ocr":{"used":false},
+		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
+	}`)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Policies")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "policy.pdf", "application/pdf", []byte("content"), false)
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload: %d %s", uploaded.Code, uploaded.Body.String())
+	}
+	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
+		t.Fatalf("process ingestion processed=%v err=%v", processed, err)
+	}
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"What is the remote work policy?"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	if len(events["retrieval"]) == 0 {
+		t.Fatalf("expected retrieval event, got %+v", events)
+	}
+	if !strings.Contains(joinDeltaText(t, events["delta"]), "retrieved Knowledge Base evidence") {
+		t.Fatalf("expected streamed answer deltas, got %+v", events["delta"])
+	}
+	if len(events["citations"]) == 0 || !strings.Contains(events["citations"][0], "policy.pdf") {
+		t.Fatalf("expected citation metadata, got %+v", events["citations"])
+	}
+}
+
+func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	firstKB := createKnowledgeBaseForTest(t, a, cookie, "First")
+	secondKB := createKnowledgeBaseForTest(t, a, cookie, "Second")
+	insertIndexedDocumentForTest(t, a, firstKB.ID, "first.pdf", "shared search term first-only")
+	insertIndexedDocumentForTest(t, a, secondKB.ID, "second.pdf", "shared search term second-only")
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(firstKB.ID, 10)+"/chat", `{"message":"shared search term"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	if len(events["citations"]) == 0 {
+		t.Fatalf("expected citations, got %+v", events)
+	}
+	if !strings.Contains(events["citations"][0], "first.pdf") || strings.Contains(events["citations"][0], "second.pdf") {
+		t.Fatalf("expected citations scoped to selected KB, got %s", events["citations"][0])
+	}
+}
+
+func TestKnowledgeBaseChatStreamingErrorWhenRetrievalFails(t *testing.T) {
+	a := newTestApp(t)
+	a.vectorIndex = nil
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Broken")
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"Will retrieval fail?"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected streaming status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	if len(events["error"]) == 0 || !strings.Contains(events["error"][0], "chat_error") {
+		t.Fatalf("expected streaming error event, got %+v", events)
+	}
+}
+
+func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
+	a := newTestApp(t)
+	current, err := a.store.findProviderSetting(context.Background(), providerPurposeChat)
+	if err != nil {
+		t.Fatalf("load provider setting: %v", err)
+	}
+	current.Model = "fake-no-retrieval"
+	if _, err := a.store.updateProviderSetting(context.Background(), current); err != nil {
+		t.Fatalf("update provider setting: %v", err)
+	}
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "No Retrieval")
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"Answer without retrieval"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected streaming status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	if len(events["error"]) == 0 || !strings.Contains(events["error"][0], "retrieval_required") {
+		t.Fatalf("expected retrieval_required error, got %+v", events)
+	}
+}
+
 func TestIngestionFailureRetriesThenFails(t *testing.T) {
 	a := newTestApp(t)
 	a.config.documentURL = "http://document.test"
@@ -773,6 +870,7 @@ func newTestApp(t *testing.T) *app {
 		config:           cfg,
 		store:            store,
 		chunkingStrategy: markdownChunkingStrategy{},
+		activeChats:      make(map[string]context.CancelFunc),
 	}
 	vectorIndex, err := newVectorIndex(a.embeddingFunc())
 	if err != nil {
@@ -868,6 +966,76 @@ func uploadFile(t *testing.T, a *app, cookie *http.Cookie, knowledgeBaseID int64
 	a.routes(mux)
 	mux.ServeHTTP(res, req)
 	return res
+}
+
+func insertIndexedDocumentForTest(t *testing.T, a *app, knowledgeBaseID int64, filename, content string) {
+	t.Helper()
+	current := createUserForTest(t, a, "owner-"+filename, "password123", roleMember)
+	doc, err := a.store.createDocument(context.Background(), documentRecord{
+		KnowledgeBaseID:  knowledgeBaseID,
+		OwnerID:          current.ID,
+		OriginalFilename: filename,
+		DisplayName:      filename,
+		ContentType:      "application/pdf",
+		SizeBytes:        int64(len(content)),
+		SHA256:           filename,
+		StorageKey:       filepath.Join("documents", filename, "original"),
+		Status:           documentStatusReady,
+	})
+	if err != nil {
+		t.Fatalf("create indexed test document: %v", err)
+	}
+	job, err := a.store.createIngestionJob(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("create ingestion job: %v", err)
+	}
+	if err := a.store.completeIngestionJob(context.Background(), job, doc, documentVersion{
+		DocumentID:         doc.ID,
+		MarkdownStorageKey: filepath.Join("documents", filename, "extracted.md"),
+		SchemaVersion:      "v0.test",
+		MetadataJSON:       "{}",
+		EmbeddingModel:     "fake-embedding",
+	}, []documentChunk{{
+		Content:          content,
+		SourceAnchorJSON: `{"id":"page-1","kind":"page","label":"Page 1"}`,
+		TokenCount:       estimatedTokenCount(content),
+	}}); err != nil {
+		t.Fatalf("complete ingestion: %v", err)
+	}
+	if err := a.rebuildVectorIndex(context.Background()); err != nil {
+		t.Fatalf("rebuild vector index: %v", err)
+	}
+}
+
+func parseSSEEvents(t *testing.T, stream string) map[string][]string {
+	t.Helper()
+	events := make(map[string][]string)
+	var eventName string
+	for _, line := range strings.Split(stream, "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+			continue
+		}
+		if strings.HasPrefix(line, "data: ") && eventName != "" {
+			events[eventName] = append(events[eventName], strings.TrimSpace(strings.TrimPrefix(line, "data: ")))
+		}
+	}
+	return events
+}
+
+func joinDeltaText(t *testing.T, deltas []string) string {
+	t.Helper()
+	var out strings.Builder
+	for _, delta := range deltas {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(delta), &payload); err != nil {
+			t.Fatalf("decode delta: %v", err)
+		}
+		out.WriteString(payload.Text)
+	}
+	return out.String()
 }
 
 func fakeDocumentClient(status int, body string) *http.Client {

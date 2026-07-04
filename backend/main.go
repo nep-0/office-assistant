@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,6 +23,8 @@ type app struct {
 	httpClient       *http.Client
 	chunkingStrategy ChunkingStrategy
 	vectorIndex      *vectorIndex
+	activeChats      map[string]context.CancelFunc
+	activeChatsMu    sync.Mutex
 }
 
 type config struct {
@@ -66,6 +69,7 @@ func main() {
 		config:           cfg,
 		store:            store,
 		chunkingStrategy: markdownChunkingStrategy{},
+		activeChats:      make(map[string]context.CancelFunc),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -144,6 +148,8 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/documents/{id}/reprocess", a.reprocessDocument)
 	mux.HandleFunc("POST /api/documents/{id}/ingestion/cancel", a.cancelDocumentIngestion)
 	mux.HandleFunc("GET /api/documents/{id}/extracted-markdown", a.getExtractedMarkdown)
+	mux.HandleFunc("POST /api/knowledge-bases/{id}/chat", a.chatKnowledgeBase)
+	mux.HandleFunc("POST /api/chat-sessions/{id}/cancel", a.cancelChatSession)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }
