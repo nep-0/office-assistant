@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,100 @@ func TestProviderSettingValidation(t *testing.T) {
 	decodeRecorder(t, res, &body)
 	if body.Code != "provider_base_url_invalid" {
 		t.Fatalf("expected provider_base_url_invalid, got %+v", body)
+	}
+}
+
+func TestMemberCanManageOwnPrivateKnowledgeBases(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+
+	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Finance"}`, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, created.Code, created.Body.String())
+	}
+	var kb knowledgeBaseResponse
+	decodeRecorder(t, created, &kb)
+	if kb.Name != "Finance" || kb.Visibility != visibilityPrivate || !kb.CanWrite {
+		t.Fatalf("unexpected knowledge base: %+v", kb)
+	}
+
+	renamed := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Finance 2026"}`, cookie)
+	if renamed.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, renamed.Code, renamed.Body.String())
+	}
+	decodeRecorder(t, renamed, &kb)
+	if kb.Name != "Finance 2026" {
+		t.Fatalf("expected renamed knowledge base, got %+v", kb)
+	}
+
+	deleted := performJSONWithCookie(t, a, http.MethodDelete, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), "", cookie)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, deleted.Code)
+	}
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases", "", cookie)
+	var body knowledgeBaseListResponse
+	decodeRecorder(t, list, &body)
+	if len(body.KnowledgeBases) != 0 {
+		t.Fatalf("expected deleted knowledge base to be hidden, got %+v", body.KnowledgeBases)
+	}
+}
+
+func TestMemberCannotReadOrMutateOtherPrivateKnowledgeBase(t *testing.T) {
+	a := newTestApp(t)
+	ownerCookie := loginAs(t, a, "owner", roleMember)
+	otherCookie := loginAs(t, a, "other", roleMember)
+
+	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Private"}`, ownerCookie)
+	var kb knowledgeBaseResponse
+	decodeRecorder(t, created, &kb)
+
+	read := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), "", otherCookie)
+	if read.Code != http.StatusNotFound {
+		t.Fatalf("expected private knowledge base to be hidden, got %d", read.Code)
+	}
+	update := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Stolen"}`, otherCookie)
+	if update.Code != http.StatusNotFound {
+		t.Fatalf("expected private knowledge base mutation to be hidden, got %d", update.Code)
+	}
+}
+
+func TestAdminCanMakeKnowledgeBasePublicAndMembersCanReadIt(t *testing.T) {
+	a := newTestApp(t)
+	ownerCookie := loginAs(t, a, "owner", roleMember)
+	adminCookie := loginAs(t, a, "admin", roleAdmin)
+	readerCookie := loginAs(t, a, "reader", roleMember)
+
+	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Shared"}`, ownerCookie)
+	var kb knowledgeBaseResponse
+	decodeRecorder(t, created, &kb)
+
+	published := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Shared","visibility":"public"}`, adminCookie)
+	if published.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, published.Code, published.Body.String())
+	}
+
+	read := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), "", readerCookie)
+	if read.Code != http.StatusOK {
+		t.Fatalf("expected public knowledge base to be readable, got %d: %s", read.Code, read.Body.String())
+	}
+	decodeRecorder(t, read, &kb)
+	if kb.Visibility != visibilityPublic || kb.CanWrite {
+		t.Fatalf("expected public read-only knowledge base for reader, got %+v", kb)
+	}
+}
+
+func TestMemberCannotMakeKnowledgeBasePublic(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+
+	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Private"}`, cookie)
+	var kb knowledgeBaseResponse
+	decodeRecorder(t, created, &kb)
+
+	res := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Private","visibility":"public"}`, cookie)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, res.Code)
 	}
 }
 

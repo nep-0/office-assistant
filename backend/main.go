@@ -115,6 +115,11 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/status", a.adminStatus)
 	mux.HandleFunc("GET /api/admin/provider-settings", a.getProviderSettings)
 	mux.HandleFunc("PUT /api/admin/provider-settings/{purpose}", a.updateProviderSetting)
+	mux.HandleFunc("GET /api/knowledge-bases", a.listKnowledgeBases)
+	mux.HandleFunc("POST /api/knowledge-bases", a.createKnowledgeBase)
+	mux.HandleFunc("GET /api/knowledge-bases/{id}", a.getKnowledgeBase)
+	mux.HandleFunc("PUT /api/knowledge-bases/{id}", a.updateKnowledgeBase)
+	mux.HandleFunc("DELETE /api/knowledge-bases/{id}", a.deleteKnowledgeBase)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }
@@ -195,7 +200,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

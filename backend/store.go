@@ -26,6 +26,16 @@ type providerSetting struct {
 	UpdatedAt time.Time
 }
 
+type knowledgeBase struct {
+	ID         int64
+	OwnerID    int64
+	OwnerName  string
+	Name       string
+	Visibility string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
 func (s *store) Close() error {
 	return s.db.Close()
 }
@@ -57,6 +67,19 @@ CREATE TABLE IF NOT EXISTS provider_settings (
 	api_key TEXT NOT NULL DEFAULT '',
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_bases (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	visibility TEXT NOT NULL CHECK (visibility IN ('private', 'public')) DEFAULT 'private',
+	deleted_at TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_bases_owner_idx ON knowledge_bases(owner_user_id);
+CREATE INDEX IF NOT EXISTS knowledge_bases_visibility_idx ON knowledge_bases(visibility);
 `)
 	return err
 }
@@ -176,6 +199,82 @@ WHERE purpose = ?
 	return s.findProviderSetting(ctx, setting.Purpose)
 }
 
+func (s *store) createKnowledgeBase(ctx context.Context, ownerID int64, name, visibility string) (knowledgeBase, error) {
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO knowledge_bases (owner_user_id, name, visibility)
+VALUES (?, ?, ?)
+`, ownerID, name, visibility)
+	if err != nil {
+		return knowledgeBase{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return knowledgeBase{}, err
+	}
+	return s.findKnowledgeBaseByID(ctx, id)
+}
+
+func (s *store) listKnowledgeBasesForUser(ctx context.Context, current user) ([]knowledgeBase, error) {
+	query := `
+SELECT knowledge_bases.id, knowledge_bases.owner_user_id, users.username, knowledge_bases.name, knowledge_bases.visibility, knowledge_bases.created_at, knowledge_bases.updated_at
+FROM knowledge_bases
+JOIN users ON users.id = knowledge_bases.owner_user_id
+WHERE knowledge_bases.deleted_at IS NULL
+`
+	args := []any{}
+	if current.Role != roleAdmin {
+		query += ` AND (knowledge_bases.owner_user_id = ? OR knowledge_bases.visibility = 'public')`
+		args = append(args, current.ID)
+	}
+	query += ` ORDER BY knowledge_bases.updated_at DESC, knowledge_bases.id DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var bases []knowledgeBase
+	for rows.Next() {
+		kb, err := scanKnowledgeBase(rows)
+		if err != nil {
+			return nil, err
+		}
+		bases = append(bases, kb)
+	}
+	return bases, rows.Err()
+}
+
+func (s *store) findKnowledgeBaseByID(ctx context.Context, id int64) (knowledgeBase, error) {
+	return scanKnowledgeBase(s.db.QueryRowContext(ctx, `
+SELECT knowledge_bases.id, knowledge_bases.owner_user_id, users.username, knowledge_bases.name, knowledge_bases.visibility, knowledge_bases.created_at, knowledge_bases.updated_at
+FROM knowledge_bases
+JOIN users ON users.id = knowledge_bases.owner_user_id
+WHERE knowledge_bases.id = ? AND knowledge_bases.deleted_at IS NULL
+`, id))
+}
+
+func (s *store) updateKnowledgeBase(ctx context.Context, id int64, name, visibility string) (knowledgeBase, error) {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE knowledge_bases
+SET name = ?, visibility = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL
+`, name, visibility, id)
+	if err != nil {
+		return knowledgeBase{}, err
+	}
+	return s.findKnowledgeBaseByID(ctx, id)
+}
+
+func (s *store) deleteKnowledgeBase(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE knowledge_bases
+SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL
+`, id)
+	return err
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -206,6 +305,26 @@ func scanProviderSetting(row rowScanner) (providerSetting, error) {
 	}
 	setting.UpdatedAt = parsed
 	return setting, nil
+}
+
+func scanKnowledgeBase(row rowScanner) (knowledgeBase, error) {
+	var kb knowledgeBase
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(&kb.ID, &kb.OwnerID, &kb.OwnerName, &kb.Name, &kb.Visibility, &createdAt, &updatedAt); err != nil {
+		return knowledgeBase{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return knowledgeBase{}, err
+	}
+	updated, err := parseSQLiteTime(updatedAt)
+	if err != nil {
+		return knowledgeBase{}, err
+	}
+	kb.CreatedAt = created
+	kb.UpdatedAt = updated
+	return kb, nil
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {

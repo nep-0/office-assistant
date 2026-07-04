@@ -165,6 +165,37 @@ button:hover {
   padding-top: 16px;
 }
 
+.inline-form {
+  align-items: end;
+  grid-template-columns: minmax(220px, 1fr) auto;
+}
+
+.knowledge-base-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.knowledge-base-item {
+  align-items: center;
+  border-top: 1px solid #e1e7ee;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 14px;
+}
+
+.knowledge-base-item strong {
+  color: #17202a;
+}
+
+.knowledge-base-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: end;
+}
+
 .checkbox-row {
   align-items: center;
   display: flex;

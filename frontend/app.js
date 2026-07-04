@@ -1,6 +1,7 @@
 const state = {
   needsSetup: false,
   user: null,
+  selectedKnowledgeBaseId: null,
 };
 
 async function api(path, options = {}) {
@@ -58,6 +59,7 @@ async function loadAuth() {
   }
 
   renderAuth();
+  await loadKnowledgeBases();
   await loadAdminStatus();
 }
 
@@ -94,6 +96,107 @@ async function loadAdminStatus() {
       ? "Signed in, but this account is not an admin."
       : "Protected route is unavailable.";
     providerPanel.hidden = true;
+  }
+}
+
+async function loadKnowledgeBases() {
+  const panel = document.querySelector("#knowledge-base-panel");
+  const summary = document.querySelector("#knowledge-base-summary");
+  const list = document.querySelector("#knowledge-base-list");
+  if (!state.user) {
+    panel.hidden = true;
+    return;
+  }
+
+  panel.hidden = false;
+  try {
+    const body = await api("/api/knowledge-bases");
+    renderKnowledgeBases(body.knowledge_bases);
+    const selected = body.knowledge_bases.find((kb) => kb.id === state.selectedKnowledgeBaseId);
+    if (!selected) {
+      state.selectedKnowledgeBaseId = body.knowledge_bases[0]?.id || null;
+    }
+    summary.textContent = state.selectedKnowledgeBaseId
+      ? `Selected Knowledge Base #${state.selectedKnowledgeBaseId}.`
+      : "No Knowledge Base selected.";
+  } catch (error) {
+    list.replaceChildren();
+    summary.textContent = "Knowledge Bases are unavailable.";
+  }
+}
+
+function renderKnowledgeBases(knowledgeBases) {
+  const list = document.querySelector("#knowledge-base-list");
+  if (knowledgeBases.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No Knowledge Bases yet.";
+    list.replaceChildren(empty);
+    return;
+  }
+
+  list.replaceChildren(
+    ...knowledgeBases.map((kb) => {
+      const item = document.createElement("section");
+      item.className = "knowledge-base-item";
+      item.dataset.id = kb.id;
+      item.innerHTML = `
+        <div>
+          <strong>${escapeText(kb.name)}</strong>
+          <p>${escapeText(kb.visibility)} · owner ${escapeText(kb.owner_name)}${kb.can_write ? " · writable" : ""}</p>
+        </div>
+        <div class="knowledge-base-actions">
+          <button type="button" data-action="select">Select</button>
+          ${kb.can_write ? `<button type="button" data-action="rename">Rename</button>` : ""}
+          ${state.user?.role === "admin" ? `
+            <button type="button" data-action="toggle-visibility">${kb.visibility === "public" ? "Make private" : "Make public"}</button>
+          ` : ""}
+          ${kb.can_write ? `<button type="button" data-action="delete">Delete</button>` : ""}
+        </div>
+      `;
+      item.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => handleKnowledgeBaseAction(button.dataset.action, kb));
+      });
+      return item;
+    }),
+  );
+}
+
+async function handleKnowledgeBaseAction(action, kb) {
+  const message = document.querySelector("#knowledge-base-message");
+  try {
+    if (action === "select") {
+      state.selectedKnowledgeBaseId = kb.id;
+      await loadKnowledgeBases();
+      return;
+    }
+    if (action === "rename") {
+      const name = window.prompt("Knowledge Base name", kb.name);
+      if (!name) return;
+      await api(`/api/knowledge-bases/${kb.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ name }),
+      });
+    }
+    if (action === "toggle-visibility") {
+      await api(`/api/knowledge-bases/${kb.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: kb.name,
+          visibility: kb.visibility === "public" ? "private" : "public",
+        }),
+      });
+    }
+    if (action === "delete") {
+      if (!window.confirm(`Delete ${kb.name}?`)) return;
+      await api(`/api/knowledge-bases/${kb.id}`, { method: "DELETE" });
+      if (state.selectedKnowledgeBaseId === kb.id) {
+        state.selectedKnowledgeBaseId = null;
+      }
+    }
+    message.textContent = "";
+    await loadKnowledgeBases();
+  } catch (error) {
+    message.textContent = error.message;
   }
 }
 
@@ -171,6 +274,12 @@ function escapeAttribute(value) {
     .replaceAll(">", "&gt;");
 }
 
+function escapeText(value) {
+  const span = document.createElement("span");
+  span.textContent = String(value);
+  return span.innerHTML;
+}
+
 document.querySelector("#auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = document.querySelector("#auth-message");
@@ -199,7 +308,26 @@ document.querySelector("#auth-form").addEventListener("submit", async (event) =>
 document.querySelector("#logout-button").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
   state.user = null;
+  state.selectedKnowledgeBaseId = null;
   await loadAuth();
+});
+
+document.querySelector("#knowledge-base-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = document.querySelector("#knowledge-base-message");
+  try {
+    const body = await api("/api/knowledge-bases", {
+      method: "POST",
+      body: JSON.stringify({ name: form.elements.name.value }),
+    });
+    state.selectedKnowledgeBaseId = body.id;
+    form.reset();
+    message.textContent = "";
+    await loadKnowledgeBases();
+  } catch (error) {
+    message.textContent = error.message;
+  }
 });
 
 loadStatus();

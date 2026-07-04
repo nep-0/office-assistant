@@ -50,6 +50,19 @@
             <h2>Admin route</h2>
             <p id="admin-status">Log in as an admin to verify protected access.</p>
           </section>
+          <section class="panel wide" id="knowledge-base-panel" hidden>
+            <h2>Knowledge Bases</h2>
+            <p id="knowledge-base-summary">Create or select a Knowledge Base.</p>
+            <form id="knowledge-base-create-form" class="form inline-form">
+              <label>
+                Name
+                <input name="name" placeholder="Finance reports" required>
+              </label>
+              <button type="submit">Create private Knowledge Base</button>
+            </form>
+            <p id="knowledge-base-message" class="message" role="status"></p>
+            <div id="knowledge-base-list" class="knowledge-base-list"></div>
+          </section>
           <section class="panel wide" id="provider-panel" hidden>
             <h2>Model providers</h2>
             <p id="provider-summary">Configure OpenAI-compatible chat and embedding endpoints.</p>
