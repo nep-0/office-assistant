@@ -189,8 +189,24 @@ button:hover {
 }
 
 .document-item {
+  align-items: center;
   border-top: 1px solid #e1e7ee;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding-top: 12px;
+}
+
+.markdown-preview {
+  background: #f7f9fb;
+  border: 1px solid #d9e0e8;
+  border-radius: 8px;
+  color: #253242;
+  margin: 16px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px;
+  white-space: pre-wrap;
 }
 
 .knowledge-base-item {
@@ -237,7 +253,8 @@ button:hover {
   }
 
   .inline-form,
-  .knowledge-base-item {
+  .knowledge-base-item,
+  .document-item {
     grid-template-columns: 1fr;
   }
 

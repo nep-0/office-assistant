@@ -13,8 +13,12 @@ import (
 )
 
 const (
-	documentStatusUploaded = "uploaded"
-	maxUploadBytes         = 50 << 20
+	documentStatusPending    = "pending"
+	documentStatusProcessing = "processing"
+	documentStatusReady      = "ready"
+	documentStatusFailed     = "failed"
+	documentStatusCancelled  = "cancelled"
+	maxUploadBytes           = 50 << 20
 )
 
 var supportedOfficeExtensions = map[string]bool{
@@ -39,6 +43,8 @@ type documentResponse struct {
 	SizeBytes        int64  `json:"size_bytes"`
 	SHA256           string `json:"sha256"`
 	Status           string `json:"status"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
 }
@@ -135,11 +141,15 @@ func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		SizeBytes:        size,
 		SHA256:           hash,
 		StorageKey:       storageKey,
-		Status:           documentStatusUploaded,
+		Status:           documentStatusPending,
 	})
 	if err != nil {
 		_ = os.Remove(finalPath)
 		writeError(w, http.StatusInternalServerError, "store_error", "could not create document record", nil)
+		return
+	}
+	if _, err := a.store.createIngestionJob(r.Context(), doc.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not create ingestion job", nil)
 		return
 	}
 	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
@@ -203,6 +213,8 @@ func toDocumentResponse(doc documentRecord) documentResponse {
 		SizeBytes:        doc.SizeBytes,
 		SHA256:           doc.SHA256,
 		Status:           doc.Status,
+		ErrorCode:        doc.ErrorCode,
+		ErrorMessage:     doc.ErrorMessage,
 		CreatedAt:        doc.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:        doc.UpdatedAt.UTC().Format(time.RFC3339),
 	}

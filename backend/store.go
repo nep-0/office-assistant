@@ -47,8 +47,32 @@ type documentRecord struct {
 	SHA256           string
 	StorageKey       string
 	Status           string
+	ErrorCode        string
+	ErrorMessage     string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type ingestionJob struct {
+	ID           int64
+	DocumentID   int64
+	Status       string
+	Attempts     int
+	MaxAttempts  int
+	ErrorCode    string
+	ErrorMessage string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type documentVersion struct {
+	ID                 int64
+	DocumentID         int64
+	VersionNo          int
+	MarkdownStorageKey string
+	SchemaVersion      string
+	MetadataJSON       string
+	CreatedAt          time.Time
 }
 
 func (s *store) Close() error {
@@ -107,6 +131,8 @@ CREATE TABLE IF NOT EXISTS documents (
 	sha256 TEXT NOT NULL,
 	storage_key TEXT NOT NULL,
 	status TEXT NOT NULL DEFAULT 'uploaded',
+	error_code TEXT NOT NULL DEFAULT '',
+	error_message TEXT NOT NULL DEFAULT '',
 	deleted_at TEXT,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -114,7 +140,66 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE INDEX IF NOT EXISTS documents_knowledge_base_idx ON documents(knowledge_base_id);
 CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(knowledge_base_id, sha256);
+
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+	status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'cancel_requested', 'cancelled')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	max_attempts INTEGER NOT NULL DEFAULT 3,
+	error_code TEXT NOT NULL DEFAULT '',
+	error_message TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ingestion_jobs_document_idx ON ingestion_jobs(document_id);
+CREATE INDEX IF NOT EXISTS ingestion_jobs_status_idx ON ingestion_jobs(status);
+
+CREATE TABLE IF NOT EXISTS document_versions (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+	version_no INTEGER NOT NULL,
+	markdown_storage_key TEXT NOT NULL,
+	schema_version TEXT NOT NULL,
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(document_id, version_no)
+);
 `)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureColumn("documents", "error_code", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return s.ensureColumn("documents", "error_message", "TEXT NOT NULL DEFAULT ''")
+}
+
+func (s *store) ensureColumn(table, column, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
 	return err
 }
 
@@ -335,7 +420,7 @@ INSERT INTO documents (
 
 func (s *store) listDocumentsForKnowledgeBase(ctx context.Context, knowledgeBaseID int64) ([]documentRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, error_code, error_message, created_at, updated_at
 FROM documents
 WHERE knowledge_base_id = ? AND deleted_at IS NULL
 ORDER BY created_at DESC, id DESC
@@ -358,7 +443,7 @@ ORDER BY created_at DESC, id DESC
 
 func (s *store) findDocumentDuplicateInKnowledgeBase(ctx context.Context, knowledgeBaseID int64, hash string) (documentRecord, error) {
 	return scanDocument(s.db.QueryRowContext(ctx, `
-SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, error_code, error_message, created_at, updated_at
 FROM documents
 WHERE knowledge_base_id = ? AND sha256 = ? AND deleted_at IS NULL
 ORDER BY created_at ASC
@@ -368,10 +453,173 @@ LIMIT 1
 
 func (s *store) findDocumentByID(ctx context.Context, id int64) (documentRecord, error) {
 	return scanDocument(s.db.QueryRowContext(ctx, `
-SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, error_code, error_message, created_at, updated_at
 FROM documents
 WHERE id = ? AND deleted_at IS NULL
 `, id))
+}
+
+func (s *store) createIngestionJob(ctx context.Context, documentID int64) (ingestionJob, error) {
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO ingestion_jobs (document_id, status)
+VALUES (?, 'pending')
+`, documentID)
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	return s.findIngestionJobByID(ctx, id)
+}
+
+func (s *store) findLatestIngestionJobForDocument(ctx context.Context, documentID int64) (ingestionJob, error) {
+	return scanIngestionJob(s.db.QueryRowContext(ctx, `
+SELECT id, document_id, status, attempts, max_attempts, error_code, error_message, created_at, updated_at
+FROM ingestion_jobs
+WHERE document_id = ?
+ORDER BY id DESC
+LIMIT 1
+`, documentID))
+}
+
+func (s *store) findIngestionJobByID(ctx context.Context, id int64) (ingestionJob, error) {
+	return scanIngestionJob(s.db.QueryRowContext(ctx, `
+SELECT id, document_id, status, attempts, max_attempts, error_code, error_message, created_at, updated_at
+FROM ingestion_jobs
+WHERE id = ?
+`, id))
+}
+
+func (s *store) claimNextIngestionJob(ctx context.Context) (ingestionJob, documentRecord, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+	defer tx.Rollback()
+
+	job, err := scanIngestionJob(tx.QueryRowContext(ctx, `
+SELECT id, document_id, status, attempts, max_attempts, error_code, error_message, created_at, updated_at
+FROM ingestion_jobs
+WHERE status IN ('pending', 'cancel_requested')
+ORDER BY id ASC
+LIMIT 1
+`))
+	if err != nil {
+		if notFound(err) {
+			return ingestionJob{}, documentRecord{}, false, nil
+		}
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+
+	if job.Status == ingestionJobCancelRequested {
+		if err := updateIngestionJobTx(ctx, tx, job.ID, ingestionJobCancelled, job.Attempts, "cancelled", "ingestion cancelled"); err != nil {
+			return ingestionJob{}, documentRecord{}, false, err
+		}
+		if err := updateDocumentStatusTx(ctx, tx, job.DocumentID, documentStatusCancelled, "cancelled", "ingestion cancelled"); err != nil {
+			return ingestionJob{}, documentRecord{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return ingestionJob{}, documentRecord{}, false, err
+		}
+		return ingestionJob{}, documentRecord{}, false, nil
+	}
+
+	attempts := job.Attempts + 1
+	if _, err := tx.ExecContext(ctx, `
+UPDATE ingestion_jobs
+SET status = 'processing', attempts = ?, error_code = '', error_message = '', updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, attempts, job.ID); err != nil {
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+	if err := updateDocumentStatusTx(ctx, tx, job.DocumentID, documentStatusProcessing, "", ""); err != nil {
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+	doc, err := scanDocument(tx.QueryRowContext(ctx, `
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, error_code, error_message, created_at, updated_at
+FROM documents
+WHERE id = ? AND deleted_at IS NULL
+`, job.DocumentID))
+	if err != nil {
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ingestionJob{}, documentRecord{}, false, err
+	}
+	job.Status = ingestionJobProcessing
+	job.Attempts = attempts
+	return job, doc, true, nil
+}
+
+func (s *store) completeIngestionJob(ctx context.Context, job ingestionJob, doc documentRecord, version documentVersion) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	versionNo, err := nextDocumentVersionNo(ctx, tx, doc.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO document_versions (document_id, version_no, markdown_storage_key, schema_version, metadata_json)
+VALUES (?, ?, ?, ?, ?)
+`, doc.ID, versionNo, version.MarkdownStorageKey, version.SchemaVersion, version.MetadataJSON); err != nil {
+		return err
+	}
+	if err := updateIngestionJobTx(ctx, tx, job.ID, ingestionJobSucceeded, job.Attempts, "", ""); err != nil {
+		return err
+	}
+	if err := updateDocumentStatusTx(ctx, tx, doc.ID, documentStatusReady, "", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *store) failIngestionJob(ctx context.Context, job ingestionJob, code, message string) error {
+	status := ingestionJobFailed
+	docStatus := documentStatusFailed
+	if job.Attempts < job.MaxAttempts {
+		status = ingestionJobPending
+		docStatus = documentStatusPending
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateIngestionJobTx(ctx, tx, job.ID, status, job.Attempts, code, message); err != nil {
+		return err
+	}
+	if err := updateDocumentStatusTx(ctx, tx, job.DocumentID, docStatus, code, message); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *store) cancelIngestionForDocument(ctx context.Context, documentID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE ingestion_jobs
+SET status = CASE WHEN status = 'processing' THEN 'cancel_requested' ELSE 'cancel_requested' END,
+	error_code = 'cancel_requested',
+	error_message = 'ingestion cancellation requested',
+	updated_at = CURRENT_TIMESTAMP
+WHERE document_id = ? AND status IN ('pending', 'processing')
+`, documentID)
+	return err
+}
+
+func (s *store) findLatestDocumentVersion(ctx context.Context, documentID int64) (documentVersion, error) {
+	return scanDocumentVersion(s.db.QueryRowContext(ctx, `
+SELECT id, document_id, version_no, markdown_storage_key, schema_version, metadata_json, created_at
+FROM document_versions
+WHERE document_id = ?
+ORDER BY version_no DESC
+LIMIT 1
+`, documentID))
 }
 
 type rowScanner interface {
@@ -441,6 +689,8 @@ func scanDocument(row rowScanner) (documentRecord, error) {
 		&doc.SHA256,
 		&doc.StorageKey,
 		&doc.Status,
+		&doc.ErrorCode,
+		&doc.ErrorMessage,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -457,6 +707,73 @@ func scanDocument(row rowScanner) (documentRecord, error) {
 	doc.CreatedAt = created
 	doc.UpdatedAt = updated
 	return doc, nil
+}
+
+func scanIngestionJob(row rowScanner) (ingestionJob, error) {
+	var job ingestionJob
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(&job.ID, &job.DocumentID, &job.Status, &job.Attempts, &job.MaxAttempts, &job.ErrorCode, &job.ErrorMessage, &createdAt, &updatedAt); err != nil {
+		return ingestionJob{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	updated, err := parseSQLiteTime(updatedAt)
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	job.CreatedAt = created
+	job.UpdatedAt = updated
+	return job, nil
+}
+
+func scanDocumentVersion(row rowScanner) (documentVersion, error) {
+	var version documentVersion
+	var createdAt string
+	if err := row.Scan(&version.ID, &version.DocumentID, &version.VersionNo, &version.MarkdownStorageKey, &version.SchemaVersion, &version.MetadataJSON, &createdAt); err != nil {
+		return documentVersion{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return documentVersion{}, err
+	}
+	version.CreatedAt = created
+	return version, nil
+}
+
+func updateIngestionJobTx(ctx context.Context, tx *sql.Tx, id int64, status string, attempts int, code, message string) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE ingestion_jobs
+SET status = ?, attempts = ?, error_code = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, status, attempts, code, message, id)
+	return err
+}
+
+func updateDocumentStatusTx(ctx context.Context, tx *sql.Tx, id int64, status, code, message string) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE documents
+SET status = ?, error_code = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+`, status, code, message, id)
+	return err
+}
+
+func nextDocumentVersionNo(ctx context.Context, tx *sql.Tx, documentID int64) (int, error) {
+	var current sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `
+SELECT MAX(version_no)
+FROM document_versions
+WHERE document_id = ?
+`, documentID).Scan(&current); err != nil {
+		return 0, err
+	}
+	if !current.Valid {
+		return 1, nil
+	}
+	return int(current.Int64) + 1, nil
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {

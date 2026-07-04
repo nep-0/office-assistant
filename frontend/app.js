@@ -159,13 +159,44 @@ function renderDocuments(documents) {
     ...documents.map((doc) => {
       const item = document.createElement("section");
       item.className = "document-item";
+      const canCancel = doc.status === "pending" || doc.status === "processing";
+      const canPreview = doc.status === "ready";
       item.innerHTML = `
-        <strong>${escapeText(doc.display_name)}</strong>
-        <p>${escapeText(doc.status)} · ${formatBytes(doc.size_bytes)} · ${escapeText(doc.content_type)}</p>
+        <div>
+          <strong>${escapeText(doc.display_name)}</strong>
+          <p>${escapeText(doc.status)} · ${formatBytes(doc.size_bytes)} · ${escapeText(doc.content_type)}</p>
+          ${doc.error_message ? `<p>${escapeText(doc.error_message)}</p>` : ""}
+        </div>
+        <div class="knowledge-base-actions">
+          ${canPreview ? `<button type="button" data-action="preview">Preview Markdown</button>` : ""}
+          ${canCancel ? `<button type="button" data-action="cancel">Cancel ingestion</button>` : ""}
+        </div>
       `;
+      item.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => handleDocumentAction(button.dataset.action, doc));
+      });
       return item;
     }),
   );
+}
+
+async function handleDocumentAction(action, doc) {
+  const message = document.querySelector("#document-message");
+  const preview = document.querySelector("#markdown-preview");
+  try {
+    if (action === "cancel") {
+      await api(`/api/documents/${doc.id}/ingestion/cancel`, { method: "POST", body: "{}" });
+      message.textContent = "Cancellation requested.";
+      await loadDocuments();
+    }
+    if (action === "preview") {
+      const body = await api(`/api/documents/${doc.id}/extracted-markdown`);
+      preview.textContent = body.markdown;
+      preview.hidden = false;
+    }
+  } catch (error) {
+    message.textContent = error.message;
+  }
 }
 
 function renderKnowledgeBases(knowledgeBases) {
@@ -405,6 +436,7 @@ async function uploadSelectedDocument(confirmDuplicate) {
   }
   form.reset();
   message.textContent = "Uploaded.";
+  document.querySelector("#markdown-preview").hidden = true;
   await loadDocuments();
 }
 

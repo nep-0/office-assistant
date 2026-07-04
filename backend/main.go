@@ -16,9 +16,10 @@ import (
 )
 
 type app struct {
-	startedAt time.Time
-	config    config
-	store     *store
+	startedAt  time.Time
+	config     config
+	store      *store
+	httpClient *http.Client
 }
 
 type config struct {
@@ -63,7 +64,11 @@ func main() {
 		startedAt: time.Now().UTC(),
 		config:    cfg,
 		store:     store,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
+	go a.runIngestionWorker(context.Background())
 
 	mux := http.NewServeMux()
 	a.routes(mux)
@@ -124,6 +129,8 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/knowledge-bases/{id}", a.deleteKnowledgeBase)
 	mux.HandleFunc("GET /api/knowledge-bases/{id}/documents", a.listDocuments)
 	mux.HandleFunc("POST /api/knowledge-bases/{id}/documents/upload", a.uploadDocument)
+	mux.HandleFunc("POST /api/documents/{id}/ingestion/cancel", a.cancelDocumentIngestion)
+	mux.HandleFunc("GET /api/documents/{id}/extracted-markdown", a.getExtractedMarkdown)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }

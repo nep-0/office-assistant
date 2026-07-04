@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -359,8 +360,8 @@ func TestUploadStoresDocumentMetadata(t *testing.T) {
 	if doc.OriginalFilename != "report.pdf" || doc.DisplayName != "report.pdf" || doc.SizeBytes != int64(len("quarterly report")) {
 		t.Fatalf("unexpected document metadata: %+v", doc)
 	}
-	if doc.SHA256 == "" || doc.Status != documentStatusUploaded {
-		t.Fatalf("expected hash and uploaded status, got %+v", doc)
+	if doc.SHA256 == "" || doc.Status != documentStatusPending {
+		t.Fatalf("expected hash and pending status, got %+v", doc)
 	}
 
 	list := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/documents", "", cookie)
@@ -434,6 +435,114 @@ func TestDuplicateDetectionDoesNotLeakOtherPrivateKnowledgeBases(t *testing.T) {
 	second := uploadFile(t, a, otherCookie, otherKB.ID, "other.pdf", "application/pdf", []byte("same private content"), false)
 	if second.Code != http.StatusCreated {
 		t.Fatalf("expected duplicate in another private knowledge base not to leak, got %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestIngestionJobStoresExtractedMarkdownArtifact(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = fakeDocumentClient(http.StatusOK, `{
+		"schema_version":"v0.fake",
+		"markdown":"# Extracted\n\nFake content.",
+		"metadata":{"kind":"fake"},
+		"warnings":[],
+		"ocr":{"used":false},
+		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
+	}`)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+
+	processed, err := a.processNextIngestionJob(context.Background())
+	if err != nil {
+		t.Fatalf("process ingestion: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected one ingestion job to be processed")
+	}
+
+	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if stored.Status != documentStatusReady {
+		t.Fatalf("expected ready document, got %+v", stored)
+	}
+
+	preview := performJSONWithCookie(t, a, http.MethodGet, "/api/documents/"+strconv.FormatInt(doc.ID, 10)+"/extracted-markdown", "", cookie)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, preview.Code, preview.Body.String())
+	}
+	var body extractedMarkdownResponse
+	decodeRecorder(t, preview, &body)
+	if !strings.Contains(body.Markdown, "Fake content") {
+		t.Fatalf("expected extracted Markdown, got %+v", body)
+	}
+}
+
+func TestIngestionFailureRetriesThenFails(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = fakeDocumentClient(http.StatusInternalServerError, `{"error":"temporary"}`)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+
+	for range 3 {
+		processed, err := a.processNextIngestionJob(context.Background())
+		if err != nil {
+			t.Fatalf("process ingestion: %v", err)
+		}
+		if !processed {
+			t.Fatal("expected ingestion job to be processed")
+		}
+	}
+
+	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if stored.Status != documentStatusFailed || stored.ErrorCode != "document_extraction_failed" {
+		t.Fatalf("expected failed document with extraction error, got %+v", stored)
+	}
+	job, err := a.store.findLatestIngestionJobForDocument(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if job.Status != ingestionJobFailed || job.Attempts != 3 {
+		t.Fatalf("expected failed job after retries, got %+v", job)
+	}
+}
+
+func TestIngestionCancellation(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+
+	cancelled := performJSONWithCookie(t, a, http.MethodPost, "/api/documents/"+strconv.FormatInt(doc.ID, 10)+"/ingestion/cancel", `{}`, cookie)
+	if cancelled.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, cancelled.Code, cancelled.Body.String())
+	}
+	processed, err := a.processNextIngestionJob(context.Background())
+	if err != nil {
+		t.Fatalf("process ingestion: %v", err)
+	}
+	if processed {
+		t.Fatal("expected cancellation processing to skip extraction")
+	}
+	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	if err != nil {
+		t.Fatalf("load document: %v", err)
+	}
+	if stored.Status != documentStatusCancelled {
+		t.Fatalf("expected cancelled document, got %+v", stored)
 	}
 }
 
@@ -545,6 +654,33 @@ func uploadFile(t *testing.T, a *app, cookie *http.Cookie, knowledgeBaseID int64
 	a.routes(mux)
 	mux.ServeHTTP(res, req)
 	return res
+}
+
+func fakeDocumentClient(status int, body string) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/extract" {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Status:     "404 Not Found",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"not_found"}`)),
+				Request:    r,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: status,
+			Status:     strconv.Itoa(status) + " " + http.StatusText(status),
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
 }
 
 func performJSON(t *testing.T, a *app, method, path, body string) *httptest.ResponseRecorder {
