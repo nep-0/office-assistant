@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,14 +32,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestReadyIncludesFakeProviders(t *testing.T) {
-	a := &app{
-		startedAt: time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
-		config: config{
-			documentURL:   "http://document:8081",
-			ocrURL:        "http://ocr:8082",
-			fakeProviders: true,
-		},
-	}
+	a := newTestApp(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/ready", nil)
 	res := httptest.NewRecorder()
 
@@ -166,11 +160,102 @@ func TestInvalidLoginReturnsStructuredError(t *testing.T) {
 	}
 }
 
+func TestAdminCanListMaskedProviderSettings(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "admin", roleAdmin)
+
+	res := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/provider-settings", "", cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+
+	var body providerSettingsResponse
+	decodeRecorder(t, res, &body)
+	if len(body.Settings) != 2 {
+		t.Fatalf("expected two provider settings, got %+v", body.Settings)
+	}
+	for _, setting := range body.Settings {
+		if setting.APIKeySet {
+			t.Fatalf("expected default test setting without API key, got %+v", setting)
+		}
+		if strings.Contains(setting.APIKeyMask, "secret") {
+			t.Fatalf("secret leaked in mask: %+v", setting)
+		}
+	}
+}
+
+func TestProviderSettingsRequireAdmin(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+
+	res := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/provider-settings", "", cookie)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d", http.StatusForbidden, res.Code)
+	}
+}
+
+func TestAdminCanSwitchProviderAndSecretIsMasked(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "admin", roleAdmin)
+
+	res := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/provider-settings/chat", `{
+		"base_url":"https://api.example.test/v1",
+		"model":"gpt-test",
+		"api_key":"super-secret-key"
+	}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+
+	var body providerSettingResponse
+	decodeRecorder(t, res, &body)
+	if body.BaseURL != "https://api.example.test/v1" || body.Model != "gpt-test" {
+		t.Fatalf("provider was not updated: %+v", body)
+	}
+	if !body.APIKeySet || body.APIKeyMask != "****-key" {
+		t.Fatalf("expected masked secret, got %+v", body)
+	}
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/provider-settings", "", cookie)
+	if strings.Contains(list.Body.String(), "super-secret-key") {
+		t.Fatalf("provider secret leaked in response: %s", list.Body.String())
+	}
+
+	ready := performJSON(t, a, http.MethodGet, "/api/ready", "")
+	var readiness readinessResponse
+	decodeRecorder(t, ready, &readiness)
+	if readiness.Dependencies["chat_model"].URL != "https://api.example.test/v1" {
+		t.Fatalf("readiness did not use active provider: %+v", readiness.Dependencies["chat_model"])
+	}
+}
+
+func TestProviderSettingValidation(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "admin", roleAdmin)
+
+	res := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/provider-settings/chat", `{
+		"base_url":"file:///tmp/model",
+		"model":"gpt-test"
+	}`, cookie)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, res.Code)
+	}
+	var body apiError
+	decodeRecorder(t, res, &body)
+	if body.Code != "provider_base_url_invalid" {
+		t.Fatalf("expected provider_base_url_invalid, got %+v", body)
+	}
+}
+
 func newTestApp(t *testing.T) *app {
 	t.Helper()
 	store, err := openStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
+	}
+	cfg := testConfig()
+	if err := store.ensureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
+		t.Fatalf("seed provider defaults: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := store.Close(); err != nil {
@@ -179,12 +264,28 @@ func newTestApp(t *testing.T) *app {
 	})
 	return &app{
 		startedAt: time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
-		config: config{
-			documentURL:   "http://document:8081",
-			ocrURL:        "http://ocr:8082",
-			fakeProviders: true,
+		config:    cfg,
+		store:     store,
+	}
+}
+
+func testConfig() config {
+	return config{
+		documentURL:   "http://document:8081",
+		ocrURL:        "http://ocr:8082",
+		fakeProviders: true,
+		defaultProviders: map[string]providerSetting{
+			providerPurposeChat: {
+				Purpose: providerPurposeChat,
+				BaseURL: "http://backend:8080/fake-openai",
+				Model:   "fake-chat",
+			},
+			providerPurposeEmbedding: {
+				Purpose: providerPurposeEmbedding,
+				BaseURL: "http://backend:8080/fake-openai",
+				Model:   "fake-embedding",
+			},
 		},
-		store: store,
 	}
 }
 
@@ -196,6 +297,16 @@ func createUserForTest(t *testing.T, a *app, username, password, role string) us
 		t.Fatalf("create user: %v", err)
 	}
 	return created
+}
+
+func loginAs(t *testing.T, a *app, username, role string) *http.Cookie {
+	t.Helper()
+	createUserForTest(t, a, username, "password123", role)
+	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"`+username+`","password":"password123"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login as %s: %d %s", username, login.Code, login.Body.String())
+	}
+	return findCookie(t, login, sessionCookie)
 }
 
 func performJSON(t *testing.T, a *app, method, path, body string) *httptest.ResponseRecorder {

@@ -17,6 +17,10 @@ services:
       DOCUMENT_URL: "http://document:8081"
       OCR_URL: "http://ocr:8082"
       FAKE_PROVIDERS: "true"
+      CHAT_PROVIDER_BASE_URL: "http://backend:8080/fake-openai"
+      CHAT_MODEL: "fake-chat"
+      EMBEDDING_PROVIDER_BASE_URL: "http://backend:8080/fake-openai"
+      EMBEDDING_MODEL: "fake-embedding"
     depends_on:
       - document
       - ocr

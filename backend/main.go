@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,11 +22,12 @@ type app struct {
 }
 
 type config struct {
-	addr          string
-	databasePath  string
-	documentURL   string
-	ocrURL        string
-	fakeProviders bool
+	addr             string
+	databasePath     string
+	documentURL      string
+	ocrURL           string
+	fakeProviders    bool
+	defaultProviders map[string]providerSetting
 }
 
 type healthResponse struct {
@@ -52,6 +54,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
+	if err := store.ensureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
+		log.Fatal(err)
+	}
 
 	a := &app{
 		startedAt: time.Now().UTC(),
@@ -75,12 +80,27 @@ func main() {
 }
 
 func loadConfig() config {
+	fakeProviders := env("FAKE_PROVIDERS", "true") == "true"
 	return config{
 		addr:          env("BACKEND_ADDR", ":8080"),
 		databasePath:  env("DATABASE_PATH", "/data/office-assistant.db"),
 		documentURL:   env("DOCUMENT_URL", "http://document:8081"),
 		ocrURL:        env("OCR_URL", "http://ocr:8082"),
-		fakeProviders: env("FAKE_PROVIDERS", "true") == "true",
+		fakeProviders: fakeProviders,
+		defaultProviders: map[string]providerSetting{
+			providerPurposeChat: {
+				Purpose: providerPurposeChat,
+				BaseURL: providerDefaultURL(fakeProviders, "CHAT_PROVIDER_BASE_URL", "http://backend:8080/fake-openai"),
+				Model:   env("CHAT_MODEL", "fake-chat"),
+				APIKey:  env("CHAT_API_KEY", ""),
+			},
+			providerPurposeEmbedding: {
+				Purpose: providerPurposeEmbedding,
+				BaseURL: providerDefaultURL(fakeProviders, "EMBEDDING_PROVIDER_BASE_URL", "http://backend:8080/fake-openai"),
+				Model:   env("EMBEDDING_MODEL", "fake-embedding"),
+				APIKey:  env("EMBEDDING_API_KEY", ""),
+			},
+		},
 	}
 }
 
@@ -93,6 +113,8 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/logout", a.logout)
 	mux.HandleFunc("GET /api/auth/me", a.me)
 	mux.HandleFunc("GET /api/admin/status", a.adminStatus)
+	mux.HandleFunc("GET /api/admin/provider-settings", a.getProviderSettings)
+	mux.HandleFunc("PUT /api/admin/provider-settings/{purpose}", a.updateProviderSetting)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }
@@ -106,10 +128,8 @@ func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) ready(w http.ResponseWriter, _ *http.Request) {
-	providerMode := "external"
-	if a.config.fakeProviders {
-		providerMode = "fake"
-	}
+	chat := a.providerDependencyStatus(providerPurposeChat)
+	embedding := a.providerDependencyStatus(providerPurposeEmbedding)
 
 	writeJSON(w, http.StatusOK, readinessResponse{
 		Status: "ready",
@@ -123,12 +143,14 @@ func (a *app) ready(w http.ResponseWriter, _ *http.Request) {
 				URL:    a.config.ocrURL,
 			},
 			"chat_model": {
-				Status: "ready",
-				Mode:   providerMode,
+				Status: chat.Status,
+				URL:    chat.URL,
+				Mode:   chat.Mode,
 			},
 			"embedding_model": {
-				Status: "ready",
-				Mode:   providerMode,
+				Status: embedding.Status,
+				URL:    embedding.URL,
+				Mode:   embedding.Mode,
 			},
 		},
 	})
@@ -173,7 +195,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -205,4 +227,14 @@ func openStore(path string) (*store, error) {
 
 func notFound(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
+}
+
+func providerDefaultURL(fakeProviders bool, key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	if fakeProviders {
+		return fallback
+	}
+	return ""
 }

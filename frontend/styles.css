@@ -74,6 +74,11 @@ h2 {
   margin: 0 0 14px;
 }
 
+h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
 .status-grid {
   display: grid;
   gap: 16px;
@@ -86,6 +91,10 @@ h2 {
   border-radius: 8px;
   padding: 20px;
   min-height: 150px;
+}
+
+.wide {
+  grid-column: 1 / -1;
 }
 
 .panel p,
@@ -142,6 +151,28 @@ button:hover {
 .message {
   color: #9b2c2c;
   min-height: 24px;
+}
+
+.provider-forms {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-top: 18px;
+}
+
+.provider-form {
+  border-top: 1px solid #e1e7ee;
+  padding-top: 16px;
+}
+
+.checkbox-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.checkbox-row input {
+  margin: 0;
 }
 
 @media (max-width: 760px) {

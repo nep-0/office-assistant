@@ -120,15 +120,22 @@ func (a *app) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) adminStatus(w http.ResponseWriter, r *http.Request) {
-	current, ok := a.currentUser(w, r)
-	if !ok {
-		return
-	}
-	if current.Role != roleAdmin {
-		writeError(w, http.StatusForbidden, "forbidden", "admin role required", nil)
+	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": roleAdmin})
+}
+
+func (a *app) requireAdmin(w http.ResponseWriter, r *http.Request) (user, bool) {
+	current, ok := a.currentUser(w, r)
+	if !ok {
+		return user{}, false
+	}
+	if current.Role != roleAdmin {
+		writeError(w, http.StatusForbidden, "forbidden", "admin role required", nil)
+		return user{}, false
+	}
+	return current, true
 }
 
 func (a *app) createUserWithPassword(r *http.Request, username, password, role string) (user, error) {

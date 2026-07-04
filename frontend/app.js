@@ -77,19 +77,98 @@ function renderAuth() {
 
 async function loadAdminStatus() {
   const adminStatus = document.querySelector("#admin-status");
+  const providerPanel = document.querySelector("#provider-panel");
   if (!state.user) {
     adminStatus.textContent = "Log in as an admin to verify protected access.";
+    providerPanel.hidden = true;
     return;
   }
 
   try {
     const body = await api("/api/admin/status");
     adminStatus.textContent = `Protected route is ${body.status} for ${body.role}.`;
+    providerPanel.hidden = false;
+    await loadProviderSettings();
   } catch (error) {
     adminStatus.textContent = error.code === "forbidden"
       ? "Signed in, but this account is not an admin."
       : "Protected route is unavailable.";
+    providerPanel.hidden = true;
   }
+}
+
+async function loadProviderSettings() {
+  const body = await api("/api/admin/provider-settings");
+  renderProviderSettings(body.settings);
+}
+
+function renderProviderSettings(settings) {
+  const container = document.querySelector("#provider-forms");
+  container.replaceChildren(
+    ...settings.map((setting) => {
+      const form = document.createElement("form");
+      form.className = "form provider-form";
+      form.dataset.purpose = setting.purpose;
+      form.innerHTML = `
+        <h3>${setting.purpose === "chat" ? "Chat model" : "Embedding model"}</h3>
+        <label>
+          Base URL
+          <input name="base_url" value="${escapeAttribute(setting.base_url)}" required>
+        </label>
+        <label>
+          Model
+          <input name="model" value="${escapeAttribute(setting.model)}" required>
+        </label>
+        <label>
+          API key
+          <input name="api_key" type="password" autocomplete="off" placeholder="${setting.api_key_set ? setting.api_key_mask : "No key set"}">
+        </label>
+        <label class="checkbox-row">
+          <input name="clear_api_key" type="checkbox">
+          Clear saved API key
+        </label>
+        <button type="submit">Save ${setting.purpose}</button>
+        <p class="message" role="status"></p>
+      `;
+      form.addEventListener("submit", saveProviderSetting);
+      return form;
+    }),
+  );
+}
+
+async function saveProviderSetting(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = form.querySelector(".message");
+  const apiKey = form.elements.api_key.value.trim();
+  const payload = {
+    base_url: form.elements.base_url.value,
+    model: form.elements.model.value,
+    clear_api_key: form.elements.clear_api_key.checked,
+  };
+  if (apiKey !== "") {
+    payload.api_key = apiKey;
+  }
+
+  try {
+    await api(`/api/admin/provider-settings/${form.dataset.purpose}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    message.textContent = "Saved.";
+    await loadProviderSettings();
+    await loadStatus();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+function escapeAttribute(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 document.querySelector("#auth-form").addEventListener("submit", async (event) => {
@@ -97,8 +176,8 @@ document.querySelector("#auth-form").addEventListener("submit", async (event) =>
   const message = document.querySelector("#auth-message");
   const form = event.currentTarget;
   const payload = {
-    username: form.username.value,
-    password: form.password.value,
+    username: form.elements.username.value,
+    password: form.elements.password.value,
   };
 
   try {
