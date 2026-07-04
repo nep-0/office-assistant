@@ -1,6 +1,7 @@
 FROM docker.io/library/python:3.14-alpine
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
 COPY ocr/server.py ./server.py
 EXPOSE 8082
 CMD ["python", "server.py"]

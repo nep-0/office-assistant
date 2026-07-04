@@ -1,6 +1,10 @@
-FROM docker.io/library/python:3.14-alpine
+FROM docker.io/library/python:3.14-slim
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+COPY document/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY document/server.py ./server.py
+COPY document/extractor.py ./extractor.py
 EXPOSE 8081
 CMD ["python", "server.py"]

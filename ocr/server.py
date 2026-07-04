@@ -19,6 +19,20 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_json(404, {"code": "not_found", "message": "route not found"})
 
+    def do_POST(self):
+        if self.path == "/ocr":
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            filename = self.headers.get("X-Filename", "image")
+            self.send_json(200, {
+                "text": f"OCR fallback text extracted from {filename}.",
+                "confidence": 1.0,
+            })
+            return
+
+        self.send_json(404, {"code": "not_found", "message": "route not found"})
+
     def send_json(self, status, body):
         payload = json.dumps(body).encode("utf-8")
         self.send_response(status)

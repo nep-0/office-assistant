@@ -34,6 +34,7 @@ services:
       dockerfile: document/Containerfile
     environment:
       DOCUMENT_PORT: "8081"
+      OCR_URL: "http://ocr:8082"
     read_only: true
     tmpfs:
       - /tmp

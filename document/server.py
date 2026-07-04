@@ -1,9 +1,13 @@
+from email.parser import BytesParser
+from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import signal
 import sys
 from datetime import datetime, timezone
+
+from extractor import ExtractionError, extract_upload
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -12,7 +16,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {
                 "status": "ready",
                 "service": "document",
-                "mode": "fake",
+                "mode": "extract",
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
             return
@@ -21,19 +25,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/extract":
-            self.send_json(200, {
-                "schema_version": "v0.fake",
-                "markdown": "# Fake extraction\n\nThis is deterministic placeholder content.",
-                "metadata": {"service": "document", "mode": "fake"},
-                "warnings": [],
-                "ocr": {"used": False},
-                "source_anchors": [
-                    {"id": "fake-page-1", "kind": "page", "label": "Page 1"}
-                ],
-            })
+            try:
+                filename, data = self.read_multipart_file()
+                package = extract_upload(filename, data, os.environ.get("OCR_URL", ""))
+                self.send_json(200, package)
+            except ExtractionError as error:
+                self.send_json(422, {"code": error.code, "message": error.message})
+            except Exception as error:
+                self.send_json(500, {"code": "extract_failed", "message": str(error)})
             return
 
         self.send_json(404, {"code": "not_found", "message": "route not found"})
+
+    def read_multipart_file(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        content_type = self.headers.get("Content-Type", "")
+        raw = self.rfile.read(length)
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {content_type}\nMIME-Version: 1.0\n\n".encode("utf-8") + raw
+        )
+        for part in message.iter_parts():
+            if part.get_param("name", header="content-disposition") == "file":
+                filename = part.get_filename() or "upload"
+                payload = part.get_payload(decode=True) or b""
+                return filename, payload
+        raise ExtractionError("upload_file_required", "file field is required")
 
     def send_json(self, status, body):
         payload = json.dumps(body).encode("utf-8")
