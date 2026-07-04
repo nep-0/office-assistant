@@ -16,10 +16,12 @@ import (
 )
 
 type app struct {
-	startedAt  time.Time
-	config     config
-	store      *store
-	httpClient *http.Client
+	startedAt        time.Time
+	config           config
+	store            *store
+	httpClient       *http.Client
+	chunkingStrategy ChunkingStrategy
+	vectorIndex      *vectorIndex
 }
 
 type config struct {
@@ -59,14 +61,22 @@ func main() {
 	if err := store.ensureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
 		log.Fatal(err)
 	}
-
 	a := &app{
-		startedAt: time.Now().UTC(),
-		config:    cfg,
-		store:     store,
+		startedAt:        time.Now().UTC(),
+		config:           cfg,
+		store:            store,
+		chunkingStrategy: markdownChunkingStrategy{},
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+	}
+	vectorIndex, err := newVectorIndex(a.embeddingFunc())
+	if err != nil {
+		log.Fatal(err)
+	}
+	a.vectorIndex = vectorIndex
+	if err := a.rebuildVectorIndex(context.Background()); err != nil {
+		log.Fatal(err)
 	}
 	go a.runIngestionWorker(context.Background())
 
@@ -128,7 +138,10 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/knowledge-bases/{id}", a.updateKnowledgeBase)
 	mux.HandleFunc("DELETE /api/knowledge-bases/{id}", a.deleteKnowledgeBase)
 	mux.HandleFunc("GET /api/knowledge-bases/{id}/documents", a.listDocuments)
+	mux.HandleFunc("GET /api/knowledge-bases/{id}/documents/search", a.searchDocuments)
 	mux.HandleFunc("POST /api/knowledge-bases/{id}/documents/upload", a.uploadDocument)
+	mux.HandleFunc("DELETE /api/documents/{id}", a.deleteDocument)
+	mux.HandleFunc("POST /api/documents/{id}/reprocess", a.reprocessDocument)
 	mux.HandleFunc("POST /api/documents/{id}/ingestion/cancel", a.cancelDocumentIngestion)
 	mux.HandleFunc("GET /api/documents/{id}/extracted-markdown", a.getExtractedMarkdown)
 	mux.HandleFunc("GET /health", a.health)

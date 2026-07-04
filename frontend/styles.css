@@ -188,6 +188,10 @@ button:hover {
   margin-top: 14px;
 }
 
+.document-search-form {
+  margin-top: 12px;
+}
+
 .document-item {
   align-items: center;
   border-top: 1px solid #e1e7ee;

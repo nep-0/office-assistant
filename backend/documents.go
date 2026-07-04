@@ -70,6 +70,31 @@ func (a *app) listDocuments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (a *app) searchDocuments(w http.ResponseWriter, r *http.Request) {
+	_, kb, ok := a.authorizedKnowledgeBase(w, r)
+	if !ok {
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	filter := documentSearchFilter{
+		Query:       ftsQuery(query),
+		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
+		ContentType: strings.TrimSpace(r.URL.Query().Get("type")),
+		DateFrom:    strings.TrimSpace(r.URL.Query().Get("from")),
+		DateTo:      strings.TrimSpace(r.URL.Query().Get("to")),
+	}
+	docs, err := a.store.searchDocuments(r.Context(), kb.ID, filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not search documents", nil)
+		return
+	}
+	res := documentListResponse{Documents: make([]documentResponse, 0, len(docs))}
+	for _, doc := range docs {
+		res.Documents = append(res.Documents, toDocumentResponse(doc))
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	current, kb, ok := a.authorizedKnowledgeBase(w, r)
 	if !ok {
@@ -155,6 +180,52 @@ func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
 }
 
+func (a *app) deleteDocument(w http.ResponseWriter, r *http.Request) {
+	current, doc, ok := a.authorizedDocument(w, r)
+	if !ok {
+		return
+	}
+	kb, err := a.store.findKnowledgeBaseByID(r.Context(), doc.KnowledgeBaseID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load knowledge base", nil)
+		return
+	}
+	if !canModifyKnowledgeBase(current, kb) {
+		writeError(w, http.StatusForbidden, "forbidden", "knowledge base write access required", nil)
+		return
+	}
+	if err := a.store.deleteDocument(r.Context(), doc.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not delete document", nil)
+		return
+	}
+	if err := a.rebuildVectorIndex(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "index_error", "could not rebuild vector index", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (a *app) reprocessDocument(w http.ResponseWriter, r *http.Request) {
+	current, doc, ok := a.authorizedDocument(w, r)
+	if !ok {
+		return
+	}
+	kb, err := a.store.findKnowledgeBaseByID(r.Context(), doc.KnowledgeBaseID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load knowledge base", nil)
+		return
+	}
+	if !canModifyKnowledgeBase(current, kb) {
+		writeError(w, http.StatusForbidden, "forbidden", "knowledge base write access required", nil)
+		return
+	}
+	if _, err := a.store.reprocessDocument(r.Context(), doc.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not schedule reprocessing", nil)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+}
+
 func (a *app) writeUploadTemp(file io.Reader) (string, string, int64, error) {
 	if err := os.MkdirAll(filepath.Join(a.config.storageRoot, "tmp"), 0o755); err != nil {
 		return "", "", 0, err
@@ -201,6 +272,16 @@ func cleanFilename(filename string) string {
 
 func supportedOfficeInput(filename string) bool {
 	return supportedOfficeExtensions[strings.ToLower(filepath.Ext(filename))]
+}
+
+func ftsQuery(query string) string {
+	terms := strings.Fields(query)
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		term = strings.ReplaceAll(term, `"`, `""`)
+		quoted = append(quoted, `"`+term+`"`)
+	}
+	return strings.Join(quoted, " ")
 }
 
 func toDocumentResponse(doc documentRecord) documentResponse {

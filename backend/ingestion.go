@@ -85,13 +85,35 @@ func (a *app) processNextIngestionJob(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, a.store.failIngestionJob(ctx, job, "artifact_store_failed", err.Error())
 	}
+	chunker := a.chunkingStrategy
+	if chunker == nil {
+		chunker = markdownChunkingStrategy{}
+	}
+	chunks, err := chunker.Chunk(pkg.Markdown, pkg.SourceAnchors)
+	if err != nil {
+		return true, a.store.failIngestionJob(ctx, job, "chunking_failed", err.Error())
+	}
+	if len(chunks) == 0 {
+		return true, a.store.failIngestionJob(ctx, job, "empty_chunks", "document extraction produced no chunks")
+	}
+	embeddingSetting, err := a.store.findProviderSetting(ctx, providerPurposeEmbedding)
+	if err != nil {
+		return true, a.store.failIngestionJob(ctx, job, "embedding_provider_missing", err.Error())
+	}
+	if err := a.preflightVectorIndex(ctx, chunks); err != nil {
+		return true, a.store.failIngestionJob(ctx, job, "embedding_failed", err.Error())
+	}
 
-	return true, a.store.completeIngestionJob(ctx, job, doc, documentVersion{
+	if err := a.store.completeIngestionJob(ctx, job, doc, documentVersion{
 		DocumentID:         doc.ID,
 		MarkdownStorageKey: markdownKey,
 		SchemaVersion:      pkg.SchemaVersion,
 		MetadataJSON:       string(metadata),
-	})
+		EmbeddingModel:     embeddingSetting.Model,
+	}, chunks); err != nil {
+		return true, err
+	}
+	return true, a.rebuildVectorIndex(ctx)
 }
 
 func (a *app) extractDocument(ctx context.Context, doc documentRecord) (extractionPackage, error) {
@@ -231,4 +253,31 @@ func (err unexpectedStatus) Error() string {
 
 func errUnexpectedStatus(status string) error {
 	return unexpectedStatus(status)
+}
+
+func (a *app) preflightVectorIndex(ctx context.Context, chunks []documentChunk) error {
+	if a.vectorIndex == nil {
+		return nil
+	}
+	probe, err := newVectorIndex(a.embeddingFunc())
+	if err != nil {
+		return err
+	}
+	for i := range chunks {
+		chunks[i].ID = int64(i + 1)
+		chunks[i].DocumentID = 1
+		chunks[i].DocumentVersionID = 1
+	}
+	return probe.rebuild(ctx, chunks)
+}
+
+func (a *app) rebuildVectorIndex(ctx context.Context) error {
+	if a.vectorIndex == nil {
+		return nil
+	}
+	chunks, err := a.store.listIndexedChunks(ctx)
+	if err != nil {
+		return err
+	}
+	return a.vectorIndex.rebuild(ctx, chunks)
 }

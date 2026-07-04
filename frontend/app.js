@@ -130,6 +130,7 @@ async function loadKnowledgeBases() {
 async function loadDocuments() {
   const panel = document.querySelector("#document-panel");
   const list = document.querySelector("#document-list");
+  const searchForm = document.querySelector("#document-search-form");
   if (!state.selectedKnowledgeBaseId) {
     panel.hidden = true;
     list.replaceChildren();
@@ -137,7 +138,11 @@ async function loadDocuments() {
   }
   panel.hidden = false;
   try {
-    const body = await api(`/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents`);
+    const query = searchForm.elements.q.value.trim();
+    const path = query
+      ? `/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents/search?q=${encodeURIComponent(query)}`
+      : `/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents`;
+    const body = await api(path);
     renderDocuments(body.documents);
   } catch (error) {
     const item = document.createElement("p");
@@ -161,6 +166,7 @@ function renderDocuments(documents) {
       item.className = "document-item";
       const canCancel = doc.status === "pending" || doc.status === "processing";
       const canPreview = doc.status === "ready";
+      const canReprocess = doc.status === "ready" || doc.status === "failed" || doc.status === "cancelled";
       item.innerHTML = `
         <div>
           <strong>${escapeText(doc.display_name)}</strong>
@@ -169,7 +175,9 @@ function renderDocuments(documents) {
         </div>
         <div class="knowledge-base-actions">
           ${canPreview ? `<button type="button" data-action="preview">Preview Markdown</button>` : ""}
+          ${canReprocess ? `<button type="button" data-action="reprocess">Reprocess</button>` : ""}
           ${canCancel ? `<button type="button" data-action="cancel">Cancel ingestion</button>` : ""}
+          <button type="button" data-action="delete">Delete</button>
         </div>
       `;
       item.querySelectorAll("button").forEach((button) => {
@@ -193,6 +201,18 @@ async function handleDocumentAction(action, doc) {
       const body = await api(`/api/documents/${doc.id}/extracted-markdown`);
       preview.textContent = body.markdown;
       preview.hidden = false;
+    }
+    if (action === "reprocess") {
+      await api(`/api/documents/${doc.id}/reprocess`, { method: "POST", body: "{}" });
+      message.textContent = "Reprocessing queued.";
+      await loadDocuments();
+    }
+    if (action === "delete") {
+      if (!window.confirm(`Delete ${doc.display_name}?`)) return;
+      await api(`/api/documents/${doc.id}`, { method: "DELETE" });
+      preview.hidden = true;
+      message.textContent = "Deleted.";
+      await loadDocuments();
     }
   } catch (error) {
     message.textContent = error.message;
@@ -407,6 +427,11 @@ document.querySelector("#knowledge-base-create-form").addEventListener("submit",
 document.querySelector("#document-upload-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await uploadSelectedDocument(false);
+});
+
+document.querySelector("#document-search-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await loadDocuments();
 });
 
 async function uploadSelectedDocument(confirmDuplicate) {

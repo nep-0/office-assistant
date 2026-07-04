@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -482,6 +483,144 @@ func TestIngestionJobStoresExtractedMarkdownArtifact(t *testing.T) {
 	}
 }
 
+func TestDocumentSearchIndexesExtractedText(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = fakeDocumentClient(http.StatusOK, `{
+		"schema_version":"v0.fake",
+		"markdown":"# Quarterly Plan\n\nRevenue expansion and hiring notes.",
+		"metadata":{"kind":"fake"},
+		"warnings":[],
+		"ocr":{"used":false},
+		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
+	}`)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Searchable")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "plan.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+
+	processed, err := a.processNextIngestionJob(context.Background())
+	if err != nil {
+		t.Fatalf("process ingestion: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected one ingestion job to be processed")
+	}
+
+	search := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/documents/search?q=revenue", "", cookie)
+	if search.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, search.Code, search.Body.String())
+	}
+	var body documentListResponse
+	decodeRecorder(t, search, &body)
+	if len(body.Documents) != 1 || body.Documents[0].ID != doc.ID {
+		t.Fatalf("expected indexed document search result, got %+v", body.Documents)
+	}
+}
+
+func TestDocumentDeleteRemovesIndexedChunksFromVectorSearch(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = fakeDocumentClient(http.StatusOK, `{
+		"schema_version":"v0.fake",
+		"markdown":"# Alpha\n\nUnique tombstone retrieval text.",
+		"metadata":{"kind":"fake"},
+		"warnings":[],
+		"ocr":{"used":false},
+		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
+	}`)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Delete")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "delete.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
+		t.Fatalf("process ingestion processed=%v err=%v", processed, err)
+	}
+	before, err := a.vectorIndex.search(context.Background(), "tombstone retrieval", 5)
+	if err != nil {
+		t.Fatalf("vector search before delete: %v", err)
+	}
+	if len(before) == 0 || before[0].DocumentID != doc.ID {
+		t.Fatalf("expected vector result before delete, got %+v", before)
+	}
+
+	deleted := performJSONWithCookie(t, a, http.MethodDelete, "/api/documents/"+strconv.FormatInt(doc.ID, 10), "", cookie)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, deleted.Code, deleted.Body.String())
+	}
+	after, err := a.vectorIndex.search(context.Background(), "tombstone retrieval", 5)
+	if err != nil {
+		t.Fatalf("vector search after delete: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("expected deleted chunks to be removed from vector search, got %+v", after)
+	}
+}
+
+func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
+	a := newTestApp(t)
+	a.config.documentURL = "http://document.test"
+	a.httpClient = sequentialDocumentClient(t, []string{
+		`{
+			"schema_version":"v0.fake",
+			"markdown":"# First\n\nOld searchable phrase.",
+			"metadata":{"kind":"fake"},
+			"warnings":[],
+			"ocr":{"used":false},
+			"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
+		}`,
+		`{
+			"schema_version":"v0.fake",
+			"markdown":"# Second\n\nNew replacement phrase.",
+			"metadata":{"kind":"fake"},
+			"warnings":[],
+			"ocr":{"used":false},
+			"source_anchors":[{"id":"page-2","kind":"page","label":"Page 2"}]
+		}`,
+	})
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Reprocess")
+	uploaded := uploadFile(t, a, cookie, kb.ID, "reprocess.pdf", "application/pdf", []byte("content"), false)
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
+		t.Fatalf("first ingestion processed=%v err=%v", processed, err)
+	}
+	reprocess := performJSONWithCookie(t, a, http.MethodPost, "/api/documents/"+strconv.FormatInt(doc.ID, 10)+"/reprocess", `{}`, cookie)
+	if reprocess.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, reprocess.Code, reprocess.Body.String())
+	}
+	pendingResults, err := a.vectorIndex.search(context.Background(), "Old searchable", 5)
+	if err != nil {
+		t.Fatalf("pending reprocess vector search: %v", err)
+	}
+	if len(pendingResults) == 0 || !strings.Contains(pendingResults[0].Content, "Old searchable") {
+		t.Fatalf("expected old chunks during pending reprocess, got %+v", pendingResults)
+	}
+	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
+		t.Fatalf("second ingestion processed=%v err=%v", processed, err)
+	}
+
+	oldResults, err := a.vectorIndex.search(context.Background(), "Old searchable", 5)
+	if err != nil {
+		t.Fatalf("old vector search: %v", err)
+	}
+	for _, result := range oldResults {
+		if strings.Contains(result.Content, "Old searchable") {
+			t.Fatalf("expected old chunks to be superseded, got %+v", oldResults)
+		}
+	}
+	newResults, err := a.vectorIndex.search(context.Background(), "New replacement", 5)
+	if err != nil {
+		t.Fatalf("new vector search: %v", err)
+	}
+	if len(newResults) == 0 || !strings.Contains(newResults[0].Content, "New replacement") {
+		t.Fatalf("expected new chunks in vector index, got %+v", newResults)
+	}
+}
+
 func TestIngestionFailureRetriesThenFails(t *testing.T) {
 	a := newTestApp(t)
 	a.config.documentURL = "http://document.test"
@@ -546,6 +685,74 @@ func TestIngestionCancellation(t *testing.T) {
 	}
 }
 
+func TestOpenRouterProviderIntegration(t *testing.T) {
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY is not set")
+	}
+	baseURL := env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+	embeddingModel := env("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
+	chatModel := env("OPENROUTER_CHAT_MODEL", "poolside/laguna-xs.2")
+	a := newTestApp(t)
+	a.httpClient = &http.Client{Timeout: 2 * time.Minute}
+	embedding, err := a.openAICompatibleEmbedding(context.Background(), providerSetting{
+		Purpose: providerPurposeEmbedding,
+		BaseURL: baseURL,
+		Model:   embeddingModel,
+		APIKey:  apiKey,
+	}, "short provider integration test")
+	if err != nil {
+		t.Fatalf("real embedding request: %v", err)
+	}
+	if len(embedding) == 0 {
+		t.Fatal("expected embedding vector")
+	}
+
+	payload := map[string]any{
+		"model": chatModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Reply with exactly: ok"},
+		},
+		"max_tokens": 8,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal chat payload: %v", err)
+	}
+	endpoint, err := joinProviderPath(baseURL, "chat/completions")
+	if err != nil {
+		t.Fatalf("chat endpoint: %v", err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("new chat request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("real chat request: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		t.Fatalf("chat provider returned %s: %s", res.Status, strings.TrimSpace(string(body)))
+	}
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 2<<20)).Decode(&decoded); err != nil {
+		t.Fatalf("decode chat response: %v", err)
+	}
+	if len(decoded.Choices) == 0 {
+		t.Fatalf("expected at least one chat choice, got %+v", decoded.Choices)
+	}
+}
+
 func newTestApp(t *testing.T) *app {
 	t.Helper()
 	store, err := openStore(filepath.Join(t.TempDir(), "test.db"))
@@ -561,11 +768,18 @@ func newTestApp(t *testing.T) *app {
 			t.Fatalf("close store: %v", err)
 		}
 	})
-	return &app{
-		startedAt: time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
-		config:    cfg,
-		store:     store,
+	a := &app{
+		startedAt:        time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
+		config:           cfg,
+		store:            store,
+		chunkingStrategy: markdownChunkingStrategy{},
 	}
+	vectorIndex, err := newVectorIndex(a.embeddingFunc())
+	if err != nil {
+		t.Fatalf("create vector index: %v", err)
+	}
+	a.vectorIndex = vectorIndex
+	return a
 }
 
 func testConfig(t *testing.T) config {
@@ -670,6 +884,34 @@ func fakeDocumentClient(status int, body string) *http.Client {
 		return &http.Response{
 			StatusCode: status,
 			Status:     strconv.Itoa(status) + " " + http.StatusText(status),
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+}
+
+func sequentialDocumentClient(t *testing.T, bodies []string) *http.Client {
+	t.Helper()
+	var index int
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/extract" {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Status:     "404 Not Found",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"not_found"}`)),
+				Request:    r,
+			}, nil
+		}
+		if index >= len(bodies) {
+			t.Fatalf("unexpected extraction request %d", index+1)
+		}
+		body := bodies[index]
+		index++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
 			Header:     make(http.Header),
 			Body:       io.NopCloser(strings.NewReader(body)),
 			Request:    r,

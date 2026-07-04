@@ -72,7 +72,23 @@ type documentVersion struct {
 	MarkdownStorageKey string
 	SchemaVersion      string
 	MetadataJSON       string
+	IndexingStatus     string
+	EmbeddingModel     string
 	CreatedAt          time.Time
+}
+
+type documentChunk struct {
+	ID                int64
+	DocumentID        int64
+	DocumentVersionID int64
+	ChunkNo           int
+	Content           string
+	HeadingPath       string
+	SourceAnchorJSON  string
+	TokenCount        int
+	EmbeddingModel    string
+	IndexingStatus    string
+	CreatedAt         time.Time
 }
 
 func (s *store) Close() error {
@@ -163,8 +179,39 @@ CREATE TABLE IF NOT EXISTS document_versions (
 	markdown_storage_key TEXT NOT NULL,
 	schema_version TEXT NOT NULL,
 	metadata_json TEXT NOT NULL DEFAULT '{}',
+	indexing_status TEXT NOT NULL DEFAULT 'pending',
+	embedding_model TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	UNIQUE(document_id, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+	document_version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+	chunk_no INTEGER NOT NULL,
+	content TEXT NOT NULL,
+	heading_path TEXT NOT NULL DEFAULT '',
+	source_anchor_json TEXT NOT NULL DEFAULT '{}',
+	token_count INTEGER NOT NULL DEFAULT 0,
+	embedding_model TEXT NOT NULL,
+	indexing_status TEXT NOT NULL CHECK (indexing_status IN ('indexed', 'superseded', 'deleted')) DEFAULT 'indexed',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(document_version_id, chunk_no)
+);
+
+CREATE INDEX IF NOT EXISTS document_chunks_document_idx ON document_chunks(document_id);
+CREATE INDEX IF NOT EXISTS document_chunks_version_idx ON document_chunks(document_version_id);
+CREATE INDEX IF NOT EXISTS document_chunks_status_idx ON document_chunks(indexing_status);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS document_search_fts USING fts5(
+	original_filename,
+	display_name,
+	content_type,
+	status,
+	created_at,
+	extracted_text,
+	tokenize='unicode61'
 );
 `)
 	if err != nil {
@@ -173,7 +220,13 @@ CREATE TABLE IF NOT EXISTS document_versions (
 	if err := s.ensureColumn("documents", "error_code", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	return s.ensureColumn("documents", "error_message", "TEXT NOT NULL DEFAULT ''")
+	if err := s.ensureColumn("documents", "error_message", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("document_versions", "indexing_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
+		return err
+	}
+	return s.ensureColumn("document_versions", "embedding_model", "TEXT NOT NULL DEFAULT ''")
 }
 
 func (s *store) ensureColumn(table, column, definition string) error {
@@ -553,7 +606,7 @@ WHERE id = ? AND deleted_at IS NULL
 	return job, doc, true, nil
 }
 
-func (s *store) completeIngestionJob(ctx context.Context, job ingestionJob, doc documentRecord, version documentVersion) error {
+func (s *store) completeIngestionJob(ctx context.Context, job ingestionJob, doc documentRecord, version documentVersion, chunks []documentChunk) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -565,15 +618,99 @@ func (s *store) completeIngestionJob(ctx context.Context, job ingestionJob, doc 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO document_versions (document_id, version_no, markdown_storage_key, schema_version, metadata_json)
-VALUES (?, ?, ?, ?, ?)
-`, doc.ID, versionNo, version.MarkdownStorageKey, version.SchemaVersion, version.MetadataJSON); err != nil {
+UPDATE document_chunks
+SET indexing_status = 'superseded'
+WHERE document_id = ? AND indexing_status = 'indexed'
+`, doc.ID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO document_versions (document_id, version_no, markdown_storage_key, schema_version, metadata_json, indexing_status, embedding_model)
+VALUES (?, ?, ?, ?, ?, 'indexed', ?)
+`, doc.ID, versionNo, version.MarkdownStorageKey, version.SchemaVersion, version.MetadataJSON, version.EmbeddingModel)
+	if err != nil {
+		return err
+	}
+	versionID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	for i, chunk := range chunks {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO document_chunks (
+	document_id,
+	document_version_id,
+	chunk_no,
+	content,
+	heading_path,
+	source_anchor_json,
+	token_count,
+	embedding_model,
+	indexing_status
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'indexed')
+`, doc.ID, versionID, i+1, chunk.Content, chunk.HeadingPath, chunk.SourceAnchorJSON, chunk.TokenCount, version.EmbeddingModel); err != nil {
+			return err
+		}
+	}
+	if err := upsertDocumentSearchTx(ctx, tx, doc, version.MarkdownStorageKey); err != nil {
 		return err
 	}
 	if err := updateIngestionJobTx(ctx, tx, job.ID, ingestionJobSucceeded, job.Attempts, "", ""); err != nil {
 		return err
 	}
 	if err := updateDocumentStatusTx(ctx, tx, doc.ID, documentStatusReady, "", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *store) reprocessDocument(ctx context.Context, documentID int64) (ingestionJob, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	defer tx.Rollback()
+	if err := updateDocumentStatusTx(ctx, tx, documentID, documentStatusPending, "", ""); err != nil {
+		return ingestionJob{}, err
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO ingestion_jobs (document_id, status)
+VALUES (?, 'pending')
+`, documentID)
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return ingestionJob{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ingestionJob{}, err
+	}
+	return s.findIngestionJobByID(ctx, id)
+}
+
+func (s *store) deleteDocument(ctx context.Context, documentID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE documents
+SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL
+`, documentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE document_chunks
+SET indexing_status = 'deleted'
+WHERE document_id = ? AND indexing_status = 'indexed'
+`, documentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_search_fts WHERE rowid = ?`, documentID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -614,12 +751,106 @@ WHERE document_id = ? AND status IN ('pending', 'processing')
 
 func (s *store) findLatestDocumentVersion(ctx context.Context, documentID int64) (documentVersion, error) {
 	return scanDocumentVersion(s.db.QueryRowContext(ctx, `
-SELECT id, document_id, version_no, markdown_storage_key, schema_version, metadata_json, created_at
+SELECT id, document_id, version_no, markdown_storage_key, schema_version, metadata_json, indexing_status, embedding_model, created_at
 FROM document_versions
 WHERE document_id = ?
 ORDER BY version_no DESC
 LIMIT 1
 `, documentID))
+}
+
+type documentSearchFilter struct {
+	Query       string
+	Status      string
+	ContentType string
+	DateFrom    string
+	DateTo      string
+}
+
+func (s *store) searchDocuments(ctx context.Context, knowledgeBaseID int64, filter documentSearchFilter) ([]documentRecord, error) {
+	query := `
+SELECT documents.id, documents.knowledge_base_id, documents.owner_user_id, documents.original_filename, documents.display_name, documents.content_type, documents.size_bytes, documents.sha256, documents.storage_key, documents.status, documents.error_code, documents.error_message, documents.created_at, documents.updated_at
+FROM documents
+`
+	args := []any{knowledgeBaseID}
+	if filter.Query != "" {
+		query += `JOIN document_search_fts ON document_search_fts.rowid = documents.id
+`
+		args = append(args, filter.Query)
+	}
+	query += `WHERE documents.knowledge_base_id = ? AND documents.deleted_at IS NULL
+`
+	if filter.Query != "" {
+		query += `AND document_search_fts MATCH ?
+`
+	}
+	if filter.Status != "" {
+		query += `AND documents.status = ?
+`
+		args = append(args, filter.Status)
+	}
+	if filter.ContentType != "" {
+		query += `AND documents.content_type = ?
+`
+		args = append(args, filter.ContentType)
+	}
+	if filter.DateFrom != "" {
+		query += `AND documents.created_at >= ?
+`
+		args = append(args, filter.DateFrom)
+	}
+	if filter.DateTo != "" {
+		query += `AND documents.created_at <= ?
+`
+		args = append(args, filter.DateTo)
+	}
+	query += `ORDER BY documents.updated_at DESC, documents.id DESC LIMIT 100`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []documentRecord
+	for rows.Next() {
+		doc, err := scanDocument(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (s *store) listIndexedChunks(ctx context.Context) ([]documentChunk, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT document_chunks.id, document_chunks.document_id, document_chunks.document_version_id, document_chunks.chunk_no, document_chunks.content, document_chunks.heading_path, document_chunks.source_anchor_json, document_chunks.token_count, document_chunks.embedding_model, document_chunks.indexing_status, document_chunks.created_at
+FROM document_chunks
+JOIN documents ON documents.id = document_chunks.document_id
+JOIN knowledge_bases ON knowledge_bases.id = documents.knowledge_base_id
+JOIN document_versions ON document_versions.id = document_chunks.document_version_id
+WHERE document_chunks.indexing_status = 'indexed'
+	AND documents.deleted_at IS NULL
+	AND knowledge_bases.deleted_at IS NULL
+	AND document_versions.id = (
+		SELECT MAX(id)
+		FROM document_versions latest
+		WHERE latest.document_id = document_chunks.document_id
+	)
+ORDER BY document_chunks.id ASC
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var chunks []documentChunk
+	for rows.Next() {
+		chunk, err := scanDocumentChunk(rows)
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks, rows.Err()
 }
 
 type rowScanner interface {
@@ -732,7 +963,7 @@ func scanIngestionJob(row rowScanner) (ingestionJob, error) {
 func scanDocumentVersion(row rowScanner) (documentVersion, error) {
 	var version documentVersion
 	var createdAt string
-	if err := row.Scan(&version.ID, &version.DocumentID, &version.VersionNo, &version.MarkdownStorageKey, &version.SchemaVersion, &version.MetadataJSON, &createdAt); err != nil {
+	if err := row.Scan(&version.ID, &version.DocumentID, &version.VersionNo, &version.MarkdownStorageKey, &version.SchemaVersion, &version.MetadataJSON, &version.IndexingStatus, &version.EmbeddingModel, &createdAt); err != nil {
 		return documentVersion{}, err
 	}
 	created, err := parseSQLiteTime(createdAt)
@@ -741,6 +972,20 @@ func scanDocumentVersion(row rowScanner) (documentVersion, error) {
 	}
 	version.CreatedAt = created
 	return version, nil
+}
+
+func scanDocumentChunk(row rowScanner) (documentChunk, error) {
+	var chunk documentChunk
+	var createdAt string
+	if err := row.Scan(&chunk.ID, &chunk.DocumentID, &chunk.DocumentVersionID, &chunk.ChunkNo, &chunk.Content, &chunk.HeadingPath, &chunk.SourceAnchorJSON, &chunk.TokenCount, &chunk.EmbeddingModel, &chunk.IndexingStatus, &createdAt); err != nil {
+		return documentChunk{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return documentChunk{}, err
+	}
+	chunk.CreatedAt = created
+	return chunk, nil
 }
 
 func updateIngestionJobTx(ctx context.Context, tx *sql.Tx, id int64, status string, attempts int, code, message string) error {
@@ -774,6 +1019,42 @@ WHERE document_id = ?
 		return 1, nil
 	}
 	return int(current.Int64) + 1, nil
+}
+
+func upsertDocumentSearchTx(ctx context.Context, tx *sql.Tx, doc documentRecord, markdownStorageKey string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_search_fts WHERE rowid = ?`, doc.ID); err != nil {
+		return err
+	}
+	var extractedText string
+	rows, err := tx.QueryContext(ctx, `
+SELECT content
+FROM document_chunks
+WHERE document_id = ? AND indexing_status = 'indexed'
+ORDER BY chunk_no ASC
+`, doc.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return err
+		}
+		if extractedText != "" {
+			extractedText += "\n\n"
+		}
+		extractedText += content
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_ = markdownStorageKey
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO document_search_fts (rowid, original_filename, display_name, content_type, status, created_at, extracted_text)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`, doc.ID, doc.OriginalFilename, doc.DisplayName, doc.ContentType, documentStatusReady, doc.CreatedAt.UTC().Format(time.RFC3339), extractedText)
+	return err
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {
