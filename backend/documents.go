@@ -226,6 +226,17 @@ func (a *app) reprocessDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 }
 
+func (a *app) downloadDocument(w http.ResponseWriter, r *http.Request) {
+	_, doc, ok := a.authorizedDocument(w, r)
+	if !ok {
+		return
+	}
+	path := filepath.Join(a.config.storageRoot, doc.StorageKey)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(doc.OriginalFilename, `"`, "")+`"`)
+	w.Header().Set("Content-Type", doc.ContentType)
+	http.ServeFile(w, r, path)
+}
+
 func (a *app) writeUploadTemp(file io.Reader) (string, string, int64, error) {
 	if err := os.MkdirAll(filepath.Join(a.config.storageRoot, "tmp"), 0o755); err != nil {
 		return "", "", 0, err

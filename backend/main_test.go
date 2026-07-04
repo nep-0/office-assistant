@@ -656,6 +656,26 @@ func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
 	if len(events["citations"]) == 0 || !strings.Contains(events["citations"][0], "policy.pdf") {
 		t.Fatalf("expected citation metadata, got %+v", events["citations"])
 	}
+	var start struct {
+		SessionID string `json:"session_id"`
+	}
+	decodeJSONText(t, events["start"][0], &start)
+	preview := performJSONWithCookie(t, a, http.MethodGet, "/api/chat-sessions/"+start.SessionID+"/citations/c1/preview", "", cookie)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("expected preview status %d, got %d: %s", http.StatusOK, preview.Code, preview.Body.String())
+	}
+	var previewBody citationPreviewResponse
+	decodeRecorder(t, preview, &previewBody)
+	if previewBody.DocumentName != "policy.pdf" || !strings.Contains(previewBody.Text, "Remote work") || previewBody.OriginalDownloadURL == "" {
+		t.Fatalf("unexpected citation preview: %+v", previewBody)
+	}
+	messages, err := a.store.listChatMessages(context.Background(), start.SessionID, 10)
+	if err != nil {
+		t.Fatalf("list chat messages: %v", err)
+	}
+	if !chatMessagesContainCitation(messages, "c1") {
+		t.Fatalf("expected persisted citation evidence, got %+v", messages)
+	}
 }
 
 func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
@@ -715,6 +735,60 @@ func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
 	events := parseSSEEvents(t, res.Body.String())
 	if len(events["error"]) == 0 || !strings.Contains(events["error"][0], "retrieval_required") {
 		t.Fatalf("expected retrieval_required error, got %+v", events)
+	}
+}
+
+func TestCitationPreviewAuthorization(t *testing.T) {
+	a := newTestApp(t)
+	ownerCookie := loginAs(t, a, "owner", roleMember)
+	otherCookie := loginAs(t, a, "other", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, ownerCookie, "Private")
+	insertIndexedDocumentForTest(t, a, kb.ID, "private.pdf", "private source text")
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"private source"}`, ownerCookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("chat: %d %s", res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	var start struct {
+		SessionID string `json:"session_id"`
+	}
+	decodeJSONText(t, events["start"][0], &start)
+
+	preview := performJSONWithCookie(t, a, http.MethodGet, "/api/chat-sessions/"+start.SessionID+"/citations/c1/preview", "", otherCookie)
+	if preview.Code != http.StatusNotFound {
+		t.Fatalf("expected unauthorized preview to be hidden, got %d: %s", preview.Code, preview.Body.String())
+	}
+	download := performJSONWithCookie(t, a, http.MethodGet, "/api/documents/1/download", "", otherCookie)
+	if download.Code != http.StatusNotFound {
+		t.Fatalf("expected unauthorized download to be hidden, got %d", download.Code)
+	}
+}
+
+func TestKnowledgeBaseChatUnsupportedAnswerHasNoCitations(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Empty")
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"What is missing?"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	if len(events["citations"]) == 0 {
+		t.Fatalf("expected citations event, got %+v", events)
+	}
+	if strings.Contains(events["citations"][0], "citation_id") {
+		t.Fatalf("expected no fake citations, got %s", events["citations"][0])
+	}
+	messages, err := a.store.listChatMessages(context.Background(), mustSessionIDFromEvents(t, events), 10)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if chatMessagesContainCitation(messages, "c1") {
+		t.Fatalf("expected no persisted citation evidence, got %+v", messages)
+	}
+	if !chatMessagesContainText(messages, unsupportedAnswerMessage()) {
+		t.Fatalf("expected unsupported answer message, got %+v", messages)
 	}
 }
 
@@ -1036,6 +1110,54 @@ func joinDeltaText(t *testing.T, deltas []string) string {
 		out.WriteString(payload.Text)
 	}
 	return out.String()
+}
+
+func decodeJSONText(t *testing.T, text string, target any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(text), target); err != nil {
+		t.Fatalf("decode JSON text: %v", err)
+	}
+}
+
+func mustSessionIDFromEvents(t *testing.T, events map[string][]string) string {
+	t.Helper()
+	if len(events["start"]) == 0 {
+		t.Fatalf("missing start event: %+v", events)
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+	}
+	decodeJSONText(t, events["start"][0], &start)
+	if start.SessionID == "" {
+		t.Fatalf("missing session id in start event: %+v", events["start"])
+	}
+	return start.SessionID
+}
+
+func chatMessagesContainCitation(messages []chatMessage, citationID string) bool {
+	for _, msg := range messages {
+		var metadata struct {
+			Citations []retrievalEvidence `json:"citations"`
+		}
+		if json.Unmarshal([]byte(msg.Metadata), &metadata) != nil {
+			continue
+		}
+		for _, citation := range metadata.Citations {
+			if citation.CitationID == citationID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func chatMessagesContainText(messages []chatMessage, text string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func fakeDocumentClient(status int, body string) *http.Client {

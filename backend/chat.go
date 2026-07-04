@@ -55,6 +55,17 @@ type retrievalEvidence struct {
 	Text         string         `json:"text"`
 }
 
+type citationPreviewResponse struct {
+	SessionID           string         `json:"session_id"`
+	CitationID          string         `json:"citation_id"`
+	DocumentID          int64          `json:"document_id"`
+	DocumentName        string         `json:"document_name"`
+	HeadingPath         string         `json:"heading_path,omitempty"`
+	SourceAnchor        map[string]any `json:"source_anchor,omitempty"`
+	Text                string         `json:"text"`
+	OriginalDownloadURL string         `json:"original_download_url"`
+}
+
 func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	current, kb, ok := a.authorizedKnowledgeBase(w, r)
 	if !ok {
@@ -115,6 +126,9 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		emit("error", apiError{Code: "retrieval_required", Message: err.Error()})
 		return
 	}
+	if len(evidence) == 0 {
+		answer = unsupportedAnswerMessage()
+	}
 	metadata, _ := json.Marshal(map[string]any{"citations": evidence})
 	if err := a.store.appendChatMessage(context.Background(), chatMessage{SessionID: sessionRecord.ID, Role: "assistant", Content: answer, Metadata: string(metadata)}); err != nil {
 		emit("error", apiError{Code: "store_error", Message: "could not save assistant message"})
@@ -122,6 +136,47 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	}
 	emit("citations", map[string]any{"citations": evidence})
 	emit("done", map[string]any{"session_id": sessionRecord.ID})
+}
+
+func (a *app) getCitationPreview(w http.ResponseWriter, r *http.Request) {
+	current, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	sessionID := r.PathValue("id")
+	citationID := r.PathValue("citation")
+	sessionRecord, err := a.store.findChatSession(r.Context(), sessionID)
+	if err != nil {
+		if notFound(err) {
+			writeError(w, http.StatusNotFound, "citation_not_found", "citation not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load citation", nil)
+		return
+	}
+	if sessionRecord.UserID != current.ID {
+		writeError(w, http.StatusNotFound, "citation_not_found", "citation not found", nil)
+		return
+	}
+	citation, ok, err := a.findPersistedCitation(r.Context(), sessionID, citationID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load citation", nil)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "citation_not_found", "citation not found", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, citationPreviewResponse{
+		SessionID:           sessionID,
+		CitationID:          citation.CitationID,
+		DocumentID:          citation.DocumentID,
+		DocumentName:        citation.DocumentName,
+		HeadingPath:         citation.HeadingPath,
+		SourceAnchor:        citation.SourceAnchor,
+		Text:                citation.Text,
+		OriginalDownloadURL: "/api/documents/" + strconv.FormatInt(citation.DocumentID, 10) + "/download",
+	})
 }
 
 func (a *app) cancelChatSession(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +395,34 @@ func (a *app) promptWithHistory(ctx context.Context, sessionID, message string) 
 
 func knowledgeBaseInstruction(kb knowledgeBase) string {
 	return "You answer questions for the selected Knowledge Base named " + kb.Name + ". Before any final answer, call retrieve_knowledge with a focused query. Use only retrieved evidence. If retrieval has no relevant results, say the documents do not contain enough information."
+}
+
+func unsupportedAnswerMessage() string {
+	return "The selected Knowledge Base does not contain enough evidence to answer that question."
+}
+
+func (a *app) findPersistedCitation(ctx context.Context, sessionID, citationID string) (retrievalEvidence, bool, error) {
+	messages, err := a.store.listChatMessages(ctx, sessionID, 100)
+	if err != nil {
+		return retrievalEvidence{}, false, err
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		var metadata struct {
+			Citations []retrievalEvidence `json:"citations"`
+		}
+		if err := json.Unmarshal([]byte(messages[i].Metadata), &metadata); err != nil {
+			continue
+		}
+		for _, citation := range metadata.Citations {
+			if citation.CitationID == citationID {
+				return citation, true, nil
+			}
+		}
+	}
+	return retrievalEvidence{}, false, nil
 }
 
 func visibleText(content *genai.Content) string {

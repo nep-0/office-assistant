@@ -559,10 +559,49 @@ function handleChatEvent(raw, assistantItem, status) {
     assistantItem.textContent += payload.text || "";
   }
   if (event === "citations") {
-    status.textContent = payload.citations?.length ? "Answer includes citations." : "";
+    renderCitations(assistantItem, payload.citations || []);
+    status.textContent = payload.citations?.length ? "Answer includes citations." : "No supporting evidence found.";
   }
   if (event === "error") {
     status.textContent = payload.message || "Chat failed.";
+  }
+}
+
+function renderCitations(assistantItem, citations) {
+  const existing = assistantItem.querySelector(".citation-list");
+  if (existing) existing.remove();
+  if (citations.length === 0) return;
+  const list = document.createElement("div");
+  list.className = "citation-list";
+  citations.forEach((citation) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "citation-button";
+    button.textContent = citation.citation_id;
+    button.title = citation.document_name;
+    button.addEventListener("click", () => openCitationPreview(citation.citation_id));
+    list.append(button);
+  });
+  assistantItem.append(list);
+}
+
+async function openCitationPreview(citationId) {
+  if (!state.chatSessionId) return;
+  const preview = document.querySelector("#citation-preview");
+  try {
+    const body = await api(`/api/chat-sessions/${state.chatSessionId}/citations/${encodeURIComponent(citationId)}/preview`);
+    const anchor = body.source_anchor?.label || body.source_anchor?.id || body.heading_path || "Source";
+    preview.innerHTML = `
+      <div class="citation-preview-header">
+        <strong>${escapeText(body.document_name)}</strong>
+        <a href="${escapeAttribute(body.original_download_url)}">Download original</a>
+      </div>
+      <p>${escapeText(anchor)}</p>
+      <pre>${escapeText(body.text)}</pre>
+    `;
+    preview.hidden = false;
+  } catch (error) {
+    document.querySelector("#chat-message").textContent = error.message;
   }
 }
 

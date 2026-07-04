@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"strings"
 
@@ -101,6 +102,9 @@ func summarizeFunctionResponse(contents []*genai.Content) string {
 				continue
 			}
 			if results, ok := part.FunctionResponse.Response["results"].([]any); ok && len(results) == 0 {
+				return "the documents do not contain enough information."
+			}
+			if strings.Contains(fmt.Sprintf("%v", part.FunctionResponse.Response["results"]), "[]") {
 				return "the documents do not contain enough information."
 			}
 			return "the documents contain relevant information. [c1]"

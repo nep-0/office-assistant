@@ -215,6 +215,53 @@ button:hover {
   border-color: #5a7d4f;
 }
 
+.citation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.citation-button {
+  background: #eef4f0;
+  border: 1px solid #b8c9bd;
+  color: #26462d;
+  min-height: 30px;
+  padding: 4px 9px;
+}
+
+.citation-button:hover {
+  background: #dfece3;
+}
+
+.citation-preview {
+  border-top: 1px solid #d9e0e8;
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.citation-preview-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.citation-preview a {
+  color: #1f6f8b;
+  font-weight: 700;
+}
+
+.citation-preview pre {
+  background: #f7f9fb;
+  border: 1px solid #d9e0e8;
+  border-radius: 8px;
+  color: #253242;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
 .chat-form {
   margin-top: 14px;
 }
