@@ -83,9 +83,11 @@ function renderAuth() {
 async function loadAdminStatus() {
   const adminStatus = document.querySelector("#admin-status");
   const providerPanel = document.querySelector("#provider-panel");
+  const observabilityPanel = document.querySelector("#observability-panel");
   if (!state.user) {
     adminStatus.textContent = "Log in as an admin to verify protected access.";
     providerPanel.hidden = true;
+    observabilityPanel.hidden = true;
     return;
   }
 
@@ -93,13 +95,69 @@ async function loadAdminStatus() {
     const body = await api("/api/admin/status");
     adminStatus.textContent = `Protected route is ${body.status} for ${body.role}.`;
     providerPanel.hidden = false;
+    observabilityPanel.hidden = false;
     await loadProviderSettings();
+    await loadObservability();
   } catch (error) {
     adminStatus.textContent = error.code === "forbidden"
       ? "Signed in, but this account is not an admin."
       : "Protected route is unavailable.";
     providerPanel.hidden = true;
+    observabilityPanel.hidden = true;
   }
+}
+
+async function loadObservability() {
+  const [debug, metrics, activity] = await Promise.all([
+    api("/api/admin/debug"),
+    api("/api/admin/metrics"),
+    api("/api/admin/activity"),
+  ]);
+  renderDebugSummary(debug);
+  renderMetrics(metrics.metrics);
+  renderActivity(activity.events);
+}
+
+function renderDebugSummary(debug) {
+  const container = document.querySelector("#debug-summary");
+  container.innerHTML = `
+    <p><strong>Debug mode:</strong> ${debug.enabled ? "On" : "Off"} · ${debug.source} · ${debug.retention_hours}h retention</p>
+    ${debug.environment_locked ? "" : `<button type="button" id="debug-toggle">${debug.enabled ? "Turn off debug" : "Turn on debug"}</button>`}
+  `;
+  const button = container.querySelector("#debug-toggle");
+  if (button) {
+    button.addEventListener("click", async () => {
+      await api("/api/admin/debug", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: !debug.enabled }),
+      });
+      await loadObservability();
+    });
+  }
+}
+
+function renderMetrics(metrics) {
+  const container = document.querySelector("#metrics-list");
+  container.innerHTML = "<h3>Recent metrics</h3>";
+  const list = document.createElement("ul");
+  metrics.slice(0, 8).forEach((metric) => {
+    const item = document.createElement("li");
+    item.textContent = `${metric.name}: ${metric.value_ms}ms${metric.count ? ` · count ${metric.count}` : ""}`;
+    list.append(item);
+  });
+  container.append(list);
+}
+
+function renderActivity(events) {
+  const container = document.querySelector("#activity-list");
+  container.innerHTML = "<h3>Recent activity</h3>";
+  const list = document.createElement("ul");
+  events.slice(0, 8).forEach((event) => {
+    const item = document.createElement("li");
+    item.textContent = `${event.event_type}${event.entity_type ? ` · ${event.entity_type}` : ""}${event.entity_id ? ` #${event.entity_id}` : ""}`;
+    list.append(item);
+  });
+  container.append(list);
 }
 
 async function loadKnowledgeBases() {

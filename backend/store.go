@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -117,6 +118,31 @@ type retrievalChunk struct {
 	Content          string
 	HeadingPath      string
 	SourceAnchorJSON string
+}
+
+type activityEvent struct {
+	ID         int64
+	UserID     int64
+	EventType  string
+	EntityType string
+	EntityID   string
+	Details    string
+	CreatedAt  time.Time
+}
+
+type workflowMetric struct {
+	ID        int64
+	Name      string
+	ValueMS   int64
+	Count     int64
+	Details   string
+	CreatedAt time.Time
+}
+
+type debugSetting struct {
+	Enabled   bool
+	Source    string
+	UpdatedAt time.Time
 }
 
 func (s *store) Close() error {
@@ -264,6 +290,48 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages(session_id, id);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL DEFAULT 0,
+	event_type TEXT NOT NULL,
+	entity_type TEXT NOT NULL DEFAULT '',
+	entity_id TEXT NOT NULL DEFAULT '',
+	details_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS activity_events_created_idx ON activity_events(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS activity_events_type_idx ON activity_events(event_type);
+
+CREATE TABLE IF NOT EXISTS workflow_metrics (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	value_ms INTEGER NOT NULL DEFAULT 0,
+	count INTEGER NOT NULL DEFAULT 0,
+	details_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS workflow_metrics_created_idx ON workflow_metrics(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS workflow_metrics_name_idx ON workflow_metrics(name);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS debug_traces (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	correlation_id TEXT NOT NULL,
+	trace_type TEXT NOT NULL,
+	payload_json TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS debug_traces_expires_idx ON debug_traces(expires_at);
 `)
 	if err != nil {
 		return err
@@ -994,6 +1062,135 @@ ORDER BY id ASC
 	return messages, rows.Err()
 }
 
+func (s *store) appendActivity(ctx context.Context, userID int64, eventType, entityType, entityID string, details map[string]any) error {
+	data, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO activity_events (user_id, event_type, entity_type, entity_id, details_json)
+VALUES (?, ?, ?, ?, ?)
+`, userID, eventType, entityType, entityID, string(data))
+	return err
+}
+
+func (s *store) listActivity(ctx context.Context, limit int) ([]activityEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, user_id, event_type, entity_type, entity_id, details_json, created_at
+FROM activity_events
+ORDER BY id DESC
+LIMIT ?
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []activityEvent
+	for rows.Next() {
+		event, err := scanActivityEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (s *store) recordMetric(ctx context.Context, name string, value time.Duration, count int64, details map[string]any) error {
+	data, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO workflow_metrics (name, value_ms, count, details_json)
+VALUES (?, ?, ?, ?)
+`, name, value.Milliseconds(), count, string(data))
+	return err
+}
+
+func (s *store) listMetrics(ctx context.Context, limit int) ([]workflowMetric, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, name, value_ms, count, details_json, created_at
+FROM workflow_metrics
+ORDER BY id DESC
+LIMIT ?
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var metrics []workflowMetric
+	for rows.Next() {
+		metric, err := scanWorkflowMetric(rows)
+		if err != nil {
+			return nil, err
+		}
+		metrics = append(metrics, metric)
+	}
+	return metrics, rows.Err()
+}
+
+func (s *store) debugSetting(ctx context.Context, envEnabled bool) (debugSetting, error) {
+	if envEnabled {
+		return debugSetting{Enabled: true, Source: "environment", UpdatedAt: time.Now().UTC()}, nil
+	}
+	var value string
+	var updatedAt string
+	err := s.db.QueryRowContext(ctx, `
+SELECT value, updated_at
+FROM app_settings
+WHERE key = 'debug_mode'
+`).Scan(&value, &updatedAt)
+	if err != nil {
+		if notFound(err) {
+			return debugSetting{Enabled: false, Source: "default", UpdatedAt: time.Time{}}, nil
+		}
+		return debugSetting{}, err
+	}
+	updated, err := parseSQLiteTime(updatedAt)
+	if err != nil {
+		return debugSetting{}, err
+	}
+	return debugSetting{Enabled: value == "true", Source: "admin", UpdatedAt: updated}, nil
+}
+
+func (s *store) setDebugMode(ctx context.Context, enabled bool) error {
+	value := "false"
+	if enabled {
+		value = "true"
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ('debug_mode', ?, CURRENT_TIMESTAMP)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+`, value)
+	return err
+}
+
+func (s *store) appendDebugTrace(ctx context.Context, correlationID, traceType string, payload map[string]any, retention time.Duration) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	expiresAt := time.Now().UTC().Add(retention).Format(time.RFC3339)
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO debug_traces (correlation_id, trace_type, payload_json, expires_at)
+VALUES (?, ?, ?, ?)
+`, correlationID, traceType, string(data), expiresAt)
+	return err
+}
+
+func (s *store) pruneDebugTraces(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM debug_traces WHERE expires_at <= ?`, now.UTC().Format(time.RFC3339))
+	return err
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -1161,6 +1358,34 @@ func scanChatMessage(row rowScanner) (chatMessage, error) {
 	}
 	msg.CreatedAt = created
 	return msg, nil
+}
+
+func scanActivityEvent(row rowScanner) (activityEvent, error) {
+	var event activityEvent
+	var createdAt string
+	if err := row.Scan(&event.ID, &event.UserID, &event.EventType, &event.EntityType, &event.EntityID, &event.Details, &createdAt); err != nil {
+		return activityEvent{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return activityEvent{}, err
+	}
+	event.CreatedAt = created
+	return event, nil
+}
+
+func scanWorkflowMetric(row rowScanner) (workflowMetric, error) {
+	var metric workflowMetric
+	var createdAt string
+	if err := row.Scan(&metric.ID, &metric.Name, &metric.ValueMS, &metric.Count, &metric.Details, &createdAt); err != nil {
+		return workflowMetric{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return workflowMetric{}, err
+	}
+	metric.CreatedAt = created
+	return metric, nil
 }
 
 func updateIngestionJobTx(ctx context.Context, tx *sql.Tx, id int64, status string, attempts int, code, message string) error {

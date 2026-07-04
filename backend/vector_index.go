@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +25,12 @@ import (
 const vectorCollectionName = "document_chunks"
 
 type vectorIndex struct {
-	mu         sync.RWMutex
-	db         *chromem.DB
-	collection *chromem.Collection
-	embed      chromem.EmbeddingFunc
-	count      int
+	mu          sync.RWMutex
+	db          *chromem.DB
+	collection  *chromem.Collection
+	embed       chromem.EmbeddingFunc
+	persistRoot string
+	count       int
 }
 
 type vectorSearchResult struct {
@@ -37,20 +40,44 @@ type vectorSearchResult struct {
 	Similarity float32
 }
 
-func newVectorIndex(embed chromem.EmbeddingFunc) (*vectorIndex, error) {
+func newVectorIndex(embed chromem.EmbeddingFunc, persistRoot string) (*vectorIndex, error) {
+	db, err := chromem.NewPersistentDB(filepath.Join(persistRoot, "chromem-go"), false)
+	if err != nil {
+		return nil, err
+	}
+	collection, err := db.GetOrCreateCollection(vectorCollectionName, nil, embed)
+	if err != nil {
+		return nil, err
+	}
+	return &vectorIndex{db: db, collection: collection, embed: embed, persistRoot: persistRoot, count: collection.Count()}, nil
+}
+
+func newInMemoryVectorIndex(embed chromem.EmbeddingFunc) (*vectorIndex, error) {
 	db := chromem.NewDB()
 	collection, err := db.GetOrCreateCollection(vectorCollectionName, nil, embed)
 	if err != nil {
 		return nil, err
 	}
-	return &vectorIndex{db: db, collection: collection, embed: embed}, nil
+	return &vectorIndex{db: db, collection: collection, embed: embed, count: collection.Count()}, nil
 }
 
 func (idx *vectorIndex) rebuild(ctx context.Context, chunks []documentChunk) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	db := chromem.NewDB()
+	var db *chromem.DB
+	var err error
+	if idx.persistRoot == "" {
+		db = chromem.NewDB()
+	} else {
+		db, err = chromem.NewPersistentDB(filepath.Join(idx.persistRoot, "chromem-go"), false)
+		if err != nil {
+			return err
+		}
+		if err := db.DeleteCollection(vectorCollectionName); err != nil {
+			return err
+		}
+	}
 	collection, err := db.GetOrCreateCollection(vectorCollectionName, nil, idx.embed)
 	if err != nil {
 		return err
@@ -129,6 +156,8 @@ func (a *app) openAICompatibleEmbedding(ctx context.Context, setting providerSet
 	if strings.Contains(setting.BaseURL, "/fake-openai") {
 		return deterministicEmbedding(text, 64), nil
 	}
+	started := time.Now()
+	log.Printf("correlation_id=%s provider=embedding model=%s event=provider_call_started", correlationID(ctx), setting.Model)
 	endpoint, err := joinProviderPath(setting.BaseURL, "embeddings")
 	if err != nil {
 		return nil, err
@@ -155,11 +184,13 @@ func (a *app) openAICompatibleEmbedding(ctx context.Context, setting providerSet
 	}
 	res, err := client.Do(req)
 	if err != nil {
+		log.Printf("correlation_id=%s provider=embedding model=%s event=provider_call_error error=%q", correlationID(ctx), setting.Model, err.Error())
 		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		log.Printf("correlation_id=%s provider=embedding model=%s event=provider_call_error status=%s", correlationID(ctx), setting.Model, res.Status)
 		return nil, fmt.Errorf("embedding provider returned %s: %s", res.Status, strings.TrimSpace(string(body)))
 	}
 	var decoded struct {
@@ -173,6 +204,7 @@ func (a *app) openAICompatibleEmbedding(ctx context.Context, setting providerSet
 	if len(decoded.Data) == 0 || len(decoded.Data[0].Embedding) == 0 {
 		return nil, errors.New("embedding provider returned no embedding")
 	}
+	log.Printf("correlation_id=%s provider=embedding model=%s event=provider_call_completed duration_ms=%d", correlationID(ctx), setting.Model, time.Since(started).Milliseconds())
 	return decoded.Data[0].Embedding, nil
 }
 

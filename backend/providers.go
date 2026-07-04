@@ -51,7 +51,8 @@ func (a *app) getProviderSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) updateProviderSetting(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.requireAdmin(w, r); !ok {
+	currentUser, ok := a.requireAdmin(w, r)
+	if !ok {
 		return
 	}
 	purpose := r.PathValue("purpose")
@@ -94,6 +95,7 @@ func (a *app) updateProviderSetting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not update provider setting", nil)
 		return
 	}
+	_ = a.store.appendActivity(r.Context(), currentUser.ID, "provider_setting_changed", "provider", purpose, map[string]any{"base_url": updated.BaseURL, "model": updated.Model, "api_key_set": updated.APIKey != ""})
 	writeJSON(w, http.StatusOK, maskProviderSetting(updated))
 }
 

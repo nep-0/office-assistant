@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,6 +178,7 @@ func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not create ingestion job", nil)
 		return
 	}
+	_ = a.store.appendActivity(r.Context(), current.ID, "document_uploaded", "document", strconv.FormatInt(doc.ID, 10), map[string]any{"knowledge_base_id": kb.ID, "filename": doc.DisplayName})
 	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
 }
 
@@ -202,6 +204,7 @@ func (a *app) deleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "index_error", "could not rebuild vector index", nil)
 		return
 	}
+	_ = a.store.appendActivity(r.Context(), current.ID, "document_deleted", "document", strconv.FormatInt(doc.ID, 10), map[string]any{"knowledge_base_id": kb.ID, "filename": doc.DisplayName})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -223,6 +226,7 @@ func (a *app) reprocessDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not schedule reprocessing", nil)
 		return
 	}
+	_ = a.store.appendActivity(r.Context(), current.ID, "document_reprocess_requested", "document", strconv.FormatInt(doc.ID, 10), map[string]any{"knowledge_base_id": kb.ID, "filename": doc.DisplayName})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 }
 

@@ -253,6 +253,52 @@ func TestProviderSettingValidation(t *testing.T) {
 	}
 }
 
+func TestAdminObservabilityRecordsActivityAndDebugMode(t *testing.T) {
+	a := newTestApp(t)
+	adminCookie := loginAs(t, a, "admin", roleAdmin)
+	createUserForTest(t, a, "member", "password123", roleMember)
+	failed := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"member","password":"wrong"}`)
+	if failed.Code != http.StatusUnauthorized {
+		t.Fatalf("expected failed login status %d, got %d", http.StatusUnauthorized, failed.Code)
+	}
+	debug := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/debug", `{"enabled":true}`, adminCookie)
+	if debug.Code != http.StatusOK {
+		t.Fatalf("expected debug status %d, got %d: %s", http.StatusOK, debug.Code, debug.Body.String())
+	}
+	activity := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/activity", "", adminCookie)
+	if activity.Code != http.StatusOK {
+		t.Fatalf("expected activity status %d, got %d: %s", http.StatusOK, activity.Code, activity.Body.String())
+	}
+	if !strings.Contains(activity.Body.String(), "login_failed") || !strings.Contains(activity.Body.String(), "debug_mode_changed") {
+		t.Fatalf("expected activity events, got %s", activity.Body.String())
+	}
+}
+
+func TestMetricsAndCorrelationID(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "admin", roleAdmin)
+	if err := a.store.recordMetric(context.Background(), "test_metric", 25*time.Millisecond, 2, map[string]any{"ok": true}); err != nil {
+		t.Fatalf("record metric: %v", err)
+	}
+	metrics := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/metrics", "", cookie)
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("expected metrics status %d, got %d: %s", http.StatusOK, metrics.Code, metrics.Body.String())
+	}
+	if !strings.Contains(metrics.Body.String(), "test_metric") {
+		t.Fatalf("expected recorded metric, got %s", metrics.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Header.Set("X-Request-ID", "test-correlation")
+	res := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	a.routes(mux)
+	withCorrelation(mux).ServeHTTP(res, req)
+	if res.Header().Get("X-Request-ID") != "test-correlation" {
+		t.Fatalf("expected correlation header, got %q", res.Header().Get("X-Request-ID"))
+	}
+}
+
 func TestMemberCanManageOwnPrivateKnowledgeBases(t *testing.T) {
 	a := newTestApp(t)
 	cookie := loginAs(t, a, "member", roleMember)
@@ -556,6 +602,25 @@ func TestDocumentDeleteRemovesIndexedChunksFromVectorSearch(t *testing.T) {
 	}
 	if len(after) != 0 {
 		t.Fatalf("expected deleted chunks to be removed from vector search, got %+v", after)
+	}
+}
+
+func TestVectorIndexPersistsWithoutStartupRebuild(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Persistent Vectors")
+	insertIndexedDocumentForTest(t, a, kb.ID, "persist.pdf", "persistent vector evidence")
+
+	reloaded, err := newVectorIndex(a.embeddingFunc(), a.config.storageRoot)
+	if err != nil {
+		t.Fatalf("reload vector index: %v", err)
+	}
+	results, err := reloaded.search(context.Background(), "persistent vector", 5)
+	if err != nil {
+		t.Fatalf("search persisted vector index: %v", err)
+	}
+	if len(results) == 0 || !strings.Contains(results[0].Content, "persistent vector evidence") {
+		t.Fatalf("expected persisted vector result without rebuild, got %+v", results)
 	}
 }
 
@@ -946,7 +1011,7 @@ func newTestApp(t *testing.T) *app {
 		chunkingStrategy: markdownChunkingStrategy{},
 		activeChats:      make(map[string]context.CancelFunc),
 	}
-	vectorIndex, err := newVectorIndex(a.embeddingFunc())
+	vectorIndex, err := newVectorIndex(a.embeddingFunc(), cfg.storageRoot)
 	if err != nil {
 		t.Fatalf("create vector index: %v", err)
 	}

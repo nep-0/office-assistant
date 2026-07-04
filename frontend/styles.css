@@ -170,6 +170,25 @@ button:hover {
   padding-top: 16px;
 }
 
+.debug-summary {
+  align-items: center;
+  border-top: 1px solid #e1e7ee;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.debug-summary p {
+  margin: 0;
+}
+
+.observability-list {
+  border-top: 1px solid #e1e7ee;
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
 .inline-form {
   align-items: end;
   grid-template-columns: minmax(220px, 1fr) auto;

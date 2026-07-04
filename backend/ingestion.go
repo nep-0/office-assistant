@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -58,10 +59,12 @@ func (a *app) runIngestionWorker(ctx context.Context) {
 }
 
 func (a *app) processNextIngestionJob(ctx context.Context) (bool, error) {
+	started := time.Now()
 	job, doc, ok, err := a.store.claimNextIngestionJob(ctx)
 	if err != nil || !ok {
 		return ok, err
 	}
+	log.Printf("correlation_id=job-%d job_id=%d document_id=%d event=ingestion_started", job.ID, job.ID, doc.ID)
 
 	pkg, err := a.extractDocument(ctx, doc)
 	if err != nil {
@@ -100,9 +103,11 @@ func (a *app) processNextIngestionJob(ctx context.Context) (bool, error) {
 	if err != nil {
 		return true, a.store.failIngestionJob(ctx, job, "embedding_provider_missing", err.Error())
 	}
+	embeddingStarted := time.Now()
 	if err := a.preflightVectorIndex(ctx, chunks); err != nil {
 		return true, a.store.failIngestionJob(ctx, job, "embedding_failed", err.Error())
 	}
+	_ = a.store.recordMetric(ctx, "embedding_duration", time.Since(embeddingStarted), int64(len(chunks)), map[string]any{"document_id": doc.ID, "job_id": job.ID})
 
 	if err := a.store.completeIngestionJob(ctx, job, doc, documentVersion{
 		DocumentID:         doc.ID,
@@ -113,6 +118,9 @@ func (a *app) processNextIngestionJob(ctx context.Context) (bool, error) {
 	}, chunks); err != nil {
 		return true, err
 	}
+	_ = a.store.recordMetric(ctx, "ingestion_duration", time.Since(started), int64(len(chunks)), map[string]any{"document_id": doc.ID, "job_id": job.ID, "chunk_count": len(chunks)})
+	_ = a.store.recordMetric(ctx, "ingestion_chunk_count", 0, int64(len(chunks)), map[string]any{"document_id": doc.ID, "job_id": job.ID})
+	log.Printf("correlation_id=job-%d job_id=%d document_id=%d chunk_count=%d event=ingestion_completed duration_ms=%d", job.ID, job.ID, doc.ID, len(chunks), time.Since(started).Milliseconds())
 	return true, a.rebuildVectorIndex(ctx)
 }
 
@@ -259,7 +267,7 @@ func (a *app) preflightVectorIndex(ctx context.Context, chunks []documentChunk) 
 	if a.vectorIndex == nil {
 		return nil
 	}
-	probe, err := newVectorIndex(a.embeddingFunc())
+	probe, err := newInMemoryVectorIndex(a.embeddingFunc())
 	if err != nil {
 		return err
 	}

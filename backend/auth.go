@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,7 @@ func (a *app) createFirstAdmin(w http.ResponseWriter, r *http.Request) {
 		writeAuthCreateError(w, err)
 		return
 	}
+	_ = a.store.appendActivity(r.Context(), created.ID, "user_created", "user", strconv.FormatInt(created.ID, 10), map[string]any{"role": created.Role, "first_admin": true})
 
 	if err := a.issueSession(w, r, created); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "could not create session", nil)
@@ -86,6 +88,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	found, err := a.store.findUserByUsername(r.Context(), normalizeUsername(req.Username))
 	if err != nil {
 		if notFound(err) {
+			_ = a.store.appendActivity(r.Context(), 0, "login_failed", "user", normalizeUsername(req.Username), map[string]any{"reason": "unknown_user"})
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "username or password is incorrect", nil)
 			return
 		}
@@ -93,6 +96,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(found.PasswordHash), []byte(req.Password)) != nil {
+		_ = a.store.appendActivity(r.Context(), found.ID, "login_failed", "user", strconv.FormatInt(found.ID, 10), map[string]any{"reason": "bad_password"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "username or password is incorrect", nil)
 		return
 	}

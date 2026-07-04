@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -129,6 +130,7 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	if len(evidence) == 0 {
 		answer = unsupportedAnswerMessage()
 	}
+	_ = a.store.recordMetric(context.Background(), "chat_token_estimate", 0, int64(estimatedTokenCount(req.Message)+estimatedTokenCount(answer)), map[string]any{"session_id": sessionRecord.ID})
 	metadata, _ := json.Marshal(map[string]any{"citations": evidence})
 	if err := a.store.appendChatMessage(context.Background(), chatMessage{SessionID: sessionRecord.ID, Role: "assistant", Content: answer, Metadata: string(metadata)}); err != nil {
 		emit("error", apiError{Code: "store_error", Message: "could not save assistant message"})
@@ -230,6 +232,7 @@ func (a *app) resolveChatSession(ctx context.Context, current user, kb knowledge
 }
 
 func (a *app) runKnowledgeBaseAgent(ctx context.Context, current user, kb knowledgeBase, sessionID, message string, emit func(string, any)) (string, []retrievalEvidence, bool, error) {
+	generationStarted := time.Now()
 	var evidence []retrievalEvidence
 	retrievalCalled := false
 	var retrievalErr error
@@ -280,11 +283,17 @@ func (a *app) runKnowledgeBaseAgent(ctx context.Context, current user, kb knowle
 	if err != nil {
 		return "", nil, false, err
 	}
+	if a.debugEnabled(ctx) {
+		_ = a.store.pruneDebugTraces(ctx, time.Now())
+		_ = a.store.appendDebugTrace(ctx, correlationID(ctx), "chat_prompt", map[string]any{"session_id": sessionID, "knowledge_base_id": kb.ID, "prompt": prompt}, debugTraceRetention)
+	}
 	userMessage := genai.NewContentFromText(prompt, genai.RoleUser)
 	var answer strings.Builder
 	sawPartial := false
+	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_started", correlationID(ctx), sessionID)
 	for event, err := range runnr.Run(ctx, strconv.FormatInt(current.ID, 10), sessionID, userMessage, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
+			log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_error error=%q", correlationID(ctx), sessionID, err.Error())
 			return "", evidence, retrievalCalled, err
 		}
 		if event == nil || event.Content == nil {
@@ -308,6 +317,8 @@ func (a *app) runKnowledgeBaseAgent(ctx context.Context, current user, kb knowle
 	if retrievalErr != nil {
 		return "", evidence, retrievalCalled, retrievalErr
 	}
+	_ = a.store.recordMetric(ctx, "generation_latency", time.Since(generationStarted), 1, map[string]any{"session_id": sessionID, "knowledge_base_id": kb.ID})
+	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_completed duration_ms=%d", correlationID(ctx), sessionID, time.Since(generationStarted).Milliseconds())
 	return answer.String(), evidence, retrievalCalled, nil
 }
 
@@ -323,6 +334,7 @@ func (a *app) retrieveKnowledge(ctx context.Context, kb knowledgeBase, args retr
 	if limit <= 0 || limit > maxRetrievalLimit {
 		limit = maxRetrievalLimit
 	}
+	started := time.Now()
 	results, err := a.vectorIndex.search(ctx, query, vectorProbeLimit)
 	if err != nil {
 		return retrievalToolResult{}, err
@@ -350,6 +362,10 @@ func (a *app) retrieveKnowledge(ctx context.Context, kb knowledgeBase, args retr
 			SourceAnchor: anchor,
 			Text:         chunk.Content,
 		})
+	}
+	_ = a.store.recordMetric(ctx, "retrieval_latency", time.Since(started), int64(len(out.Results)), map[string]any{"knowledge_base_id": kb.ID, "query": query})
+	if a.debugEnabled(ctx) {
+		_ = a.store.appendDebugTrace(ctx, correlationID(ctx), "retrieval", map[string]any{"knowledge_base_id": kb.ID, "query": query, "result_count": len(out.Results)}, debugTraceRetention)
 	}
 	return out, nil
 }

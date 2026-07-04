@@ -34,6 +34,7 @@ type config struct {
 	documentURL      string
 	ocrURL           string
 	fakeProviders    bool
+	debugEnvEnabled  bool
 	defaultProviders map[string]providerSetting
 }
 
@@ -74,14 +75,11 @@ func main() {
 			Timeout: 30 * time.Second,
 		},
 	}
-	vectorIndex, err := newVectorIndex(a.embeddingFunc())
+	vectorIndex, err := newVectorIndex(a.embeddingFunc(), cfg.storageRoot)
 	if err != nil {
 		log.Fatal(err)
 	}
 	a.vectorIndex = vectorIndex
-	if err := a.rebuildVectorIndex(context.Background()); err != nil {
-		log.Fatal(err)
-	}
 	go a.runIngestionWorker(context.Background())
 
 	mux := http.NewServeMux()
@@ -89,7 +87,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           withCORS(mux),
+		Handler:           withCORS(withCorrelation(mux)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -102,12 +100,13 @@ func main() {
 func loadConfig() config {
 	fakeProviders := env("FAKE_PROVIDERS", "true") == "true"
 	return config{
-		addr:          env("BACKEND_ADDR", ":8080"),
-		databasePath:  env("DATABASE_PATH", "/data/office-assistant.db"),
-		storageRoot:   env("STORAGE_ROOT", "/data/files"),
-		documentURL:   env("DOCUMENT_URL", "http://document:8081"),
-		ocrURL:        env("OCR_URL", "http://ocr:8082"),
-		fakeProviders: fakeProviders,
+		addr:            env("BACKEND_ADDR", ":8080"),
+		databasePath:    env("DATABASE_PATH", "/data/office-assistant.db"),
+		storageRoot:     env("STORAGE_ROOT", "/data/files"),
+		documentURL:     env("DOCUMENT_URL", "http://document:8081"),
+		ocrURL:          env("OCR_URL", "http://ocr:8082"),
+		fakeProviders:   fakeProviders,
+		debugEnvEnabled: env("DEBUG_MODE", "false") == "true",
 		defaultProviders: map[string]providerSetting{
 			providerPurposeChat: {
 				Purpose: providerPurposeChat,
@@ -134,6 +133,10 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/logout", a.logout)
 	mux.HandleFunc("GET /api/auth/me", a.me)
 	mux.HandleFunc("GET /api/admin/status", a.adminStatus)
+	mux.HandleFunc("GET /api/admin/activity", a.getActivity)
+	mux.HandleFunc("GET /api/admin/metrics", a.getMetrics)
+	mux.HandleFunc("GET /api/admin/debug", a.getDebugMode)
+	mux.HandleFunc("PUT /api/admin/debug", a.updateDebugMode)
 	mux.HandleFunc("GET /api/admin/provider-settings", a.getProviderSettings)
 	mux.HandleFunc("PUT /api/admin/provider-settings/{purpose}", a.updateProviderSetting)
 	mux.HandleFunc("GET /api/knowledge-bases", a.listKnowledgeBases)
