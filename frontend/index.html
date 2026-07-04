@@ -62,6 +62,18 @@
             </form>
             <p id="knowledge-base-message" class="message" role="status"></p>
             <div id="knowledge-base-list" class="knowledge-base-list"></div>
+            <section id="document-panel" class="document-panel" hidden>
+              <h3>Documents</h3>
+              <form id="document-upload-form" class="form inline-form">
+                <label>
+                  File
+                  <input name="file" type="file" required>
+                </label>
+                <button type="submit">Upload</button>
+              </form>
+              <p id="document-message" class="message" role="status"></p>
+              <div id="document-list" class="document-list"></div>
+            </section>
           </section>
           <section class="panel wide" id="provider-panel" hidden>
             <h2>Model providers</h2>

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -342,13 +345,105 @@ func TestMemberCannotMakeKnowledgeBasePublic(t *testing.T) {
 	}
 }
 
+func TestUploadStoresDocumentMetadata(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
+
+	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("quarterly report"), false)
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, uploaded.Code, uploaded.Body.String())
+	}
+	var doc documentResponse
+	decodeRecorder(t, uploaded, &doc)
+	if doc.OriginalFilename != "report.pdf" || doc.DisplayName != "report.pdf" || doc.SizeBytes != int64(len("quarterly report")) {
+		t.Fatalf("unexpected document metadata: %+v", doc)
+	}
+	if doc.SHA256 == "" || doc.Status != documentStatusUploaded {
+		t.Fatalf("expected hash and uploaded status, got %+v", doc)
+	}
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/documents", "", cookie)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, list.Code)
+	}
+	var docs documentListResponse
+	decodeRecorder(t, list, &docs)
+	if len(docs.Documents) != 1 || docs.Documents[0].ID != doc.ID {
+		t.Fatalf("expected uploaded document in list, got %+v", docs.Documents)
+	}
+}
+
+func TestUploadDuplicateWarnsBeforeCreatingDocument(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
+
+	first := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("same content"), false)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, first.Code)
+	}
+
+	duplicate := uploadFile(t, a, cookie, kb.ID, "copy.pdf", "application/pdf", []byte("same content"), false)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, duplicate.Code, duplicate.Body.String())
+	}
+	var apiErr apiError
+	decodeRecorder(t, duplicate, &apiErr)
+	if apiErr.Code != "duplicate_document" || apiErr.Details["duplicate"] == nil {
+		t.Fatalf("expected duplicate details, got %+v", apiErr)
+	}
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/documents", "", cookie)
+	var docs documentListResponse
+	decodeRecorder(t, list, &docs)
+	if len(docs.Documents) != 1 {
+		t.Fatalf("expected duplicate warning to avoid creating document, got %+v", docs.Documents)
+	}
+
+	confirmed := uploadFile(t, a, cookie, kb.ID, "copy.pdf", "application/pdf", []byte("same content"), true)
+	if confirmed.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, confirmed.Code, confirmed.Body.String())
+	}
+}
+
+func TestUploadRequiresKnowledgeBaseWriteAccess(t *testing.T) {
+	a := newTestApp(t)
+	ownerCookie := loginAs(t, a, "owner", roleMember)
+	otherCookie := loginAs(t, a, "other", roleMember)
+	kb := createKnowledgeBaseForTest(t, a, ownerCookie, "Private")
+
+	res := uploadFile(t, a, otherCookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("expected private knowledge base to be hidden, got %d", res.Code)
+	}
+}
+
+func TestDuplicateDetectionDoesNotLeakOtherPrivateKnowledgeBases(t *testing.T) {
+	a := newTestApp(t)
+	ownerCookie := loginAs(t, a, "owner", roleMember)
+	otherCookie := loginAs(t, a, "other", roleMember)
+	ownerKB := createKnowledgeBaseForTest(t, a, ownerCookie, "Owner")
+	otherKB := createKnowledgeBaseForTest(t, a, otherCookie, "Other")
+
+	first := uploadFile(t, a, ownerCookie, ownerKB.ID, "private.pdf", "application/pdf", []byte("same private content"), false)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, first.Code)
+	}
+
+	second := uploadFile(t, a, otherCookie, otherKB.ID, "other.pdf", "application/pdf", []byte("same private content"), false)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("expected duplicate in another private knowledge base not to leak, got %d: %s", second.Code, second.Body.String())
+	}
+}
+
 func newTestApp(t *testing.T) *app {
 	t.Helper()
 	store, err := openStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	cfg := testConfig()
+	cfg := testConfig(t)
 	if err := store.ensureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
 		t.Fatalf("seed provider defaults: %v", err)
 	}
@@ -364,11 +459,13 @@ func newTestApp(t *testing.T) *app {
 	}
 }
 
-func testConfig() config {
+func testConfig(t *testing.T) config {
+	t.Helper()
 	return config{
 		documentURL:   "http://document:8081",
 		ocrURL:        "http://ocr:8082",
 		fakeProviders: true,
+		storageRoot:   filepath.Join(t.TempDir(), "files"),
 		defaultProviders: map[string]providerSetting{
 			providerPurposeChat: {
 				Purpose: providerPurposeChat,
@@ -402,6 +499,52 @@ func loginAs(t *testing.T, a *app, username, role string) *http.Cookie {
 		t.Fatalf("login as %s: %d %s", username, login.Code, login.Body.String())
 	}
 	return findCookie(t, login, sessionCookie)
+}
+
+func createKnowledgeBaseForTest(t *testing.T, a *app, cookie *http.Cookie, name string) knowledgeBaseResponse {
+	t.Helper()
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"`+name+`"}`, cookie)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create knowledge base: %d %s", res.Code, res.Body.String())
+	}
+	var kb knowledgeBaseResponse
+	decodeRecorder(t, res, &kb)
+	return kb
+}
+
+func uploadFile(t *testing.T, a *app, cookie *http.Cookie, knowledgeBaseID int64, filename, contentType string, content []byte, confirmDuplicate bool) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	path := "/api/knowledge-bases/" + strconv.FormatInt(knowledgeBaseID, 10) + "/documents/upload"
+	if confirmDuplicate {
+		path += "?confirm_duplicate=true"
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	res := httptest.NewRecorder()
+
+	mux := http.NewServeMux()
+	a.routes(mux)
+	mux.ServeHTTP(res, req)
+	return res
 }
 
 func performJSON(t *testing.T, a *app, method, path, body string) *httptest.ResponseRecorder {

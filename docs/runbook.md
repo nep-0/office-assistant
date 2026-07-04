@@ -38,3 +38,7 @@ The backend seeds first-boot Dual-Mode Model Provider settings from environment 
 - `EMBEDDING_API_KEY`
 
 Admins can change the active chat and embedding provider settings in the UI after login. API keys stay backend-side, are masked in API responses, and are not written into frontend assets.
+
+## Backend State
+
+The backend owns persistent application state in its mounted volume. SQLite lives at `/data/office-assistant.db`, and uploaded original documents are stored under `/data/files` using internal storage identifiers rather than user filenames.

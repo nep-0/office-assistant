@@ -14,6 +14,7 @@ services:
       dockerfile: backend/Containerfile
     environment:
       BACKEND_ADDR: ":8080"
+      STORAGE_ROOT: "/data/files"
       DOCUMENT_URL: "http://document:8081"
       OCR_URL: "http://ocr:8082"
       FAKE_PROVIDERS: "true"

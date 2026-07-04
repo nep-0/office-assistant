@@ -24,6 +24,7 @@ type app struct {
 type config struct {
 	addr             string
 	databasePath     string
+	storageRoot      string
 	documentURL      string
 	ocrURL           string
 	fakeProviders    bool
@@ -84,6 +85,7 @@ func loadConfig() config {
 	return config{
 		addr:          env("BACKEND_ADDR", ":8080"),
 		databasePath:  env("DATABASE_PATH", "/data/office-assistant.db"),
+		storageRoot:   env("STORAGE_ROOT", "/data/files"),
 		documentURL:   env("DOCUMENT_URL", "http://document:8081"),
 		ocrURL:        env("OCR_URL", "http://ocr:8082"),
 		fakeProviders: fakeProviders,
@@ -120,6 +122,8 @@ func (a *app) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/knowledge-bases/{id}", a.getKnowledgeBase)
 	mux.HandleFunc("PUT /api/knowledge-bases/{id}", a.updateKnowledgeBase)
 	mux.HandleFunc("DELETE /api/knowledge-bases/{id}", a.deleteKnowledgeBase)
+	mux.HandleFunc("GET /api/knowledge-bases/{id}/documents", a.listDocuments)
+	mux.HandleFunc("POST /api/knowledge-bases/{id}/documents/upload", a.uploadDocument)
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("GET /ready", a.ready)
 }

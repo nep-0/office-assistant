@@ -13,6 +13,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(body.message || "Request failed");
     error.code = body.code || "request_failed";
+    error.details = body.details || {};
     throw error;
   }
   return body;
@@ -119,10 +120,52 @@ async function loadKnowledgeBases() {
     summary.textContent = state.selectedKnowledgeBaseId
       ? `Selected Knowledge Base #${state.selectedKnowledgeBaseId}.`
       : "No Knowledge Base selected.";
+    await loadDocuments();
   } catch (error) {
     list.replaceChildren();
     summary.textContent = "Knowledge Bases are unavailable.";
   }
+}
+
+async function loadDocuments() {
+  const panel = document.querySelector("#document-panel");
+  const list = document.querySelector("#document-list");
+  if (!state.selectedKnowledgeBaseId) {
+    panel.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+  panel.hidden = false;
+  try {
+    const body = await api(`/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents`);
+    renderDocuments(body.documents);
+  } catch (error) {
+    const item = document.createElement("p");
+    item.textContent = "Documents are unavailable.";
+    list.replaceChildren(item);
+  }
+}
+
+function renderDocuments(documents) {
+  const list = document.querySelector("#document-list");
+  if (documents.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No documents uploaded.";
+    list.replaceChildren(empty);
+    return;
+  }
+
+  list.replaceChildren(
+    ...documents.map((doc) => {
+      const item = document.createElement("section");
+      item.className = "document-item";
+      item.innerHTML = `
+        <strong>${escapeText(doc.display_name)}</strong>
+        <p>${escapeText(doc.status)} · ${formatBytes(doc.size_bytes)} · ${escapeText(doc.content_type)}</p>
+      `;
+      return item;
+    }),
+  );
 }
 
 function renderKnowledgeBases(knowledgeBases) {
@@ -329,6 +372,47 @@ document.querySelector("#knowledge-base-create-form").addEventListener("submit",
     message.textContent = error.message;
   }
 });
+
+document.querySelector("#document-upload-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await uploadSelectedDocument(false);
+});
+
+async function uploadSelectedDocument(confirmDuplicate) {
+  const form = document.querySelector("#document-upload-form");
+  const message = document.querySelector("#document-message");
+  const file = form.elements.file.files[0];
+  if (!file || !state.selectedKnowledgeBaseId) return;
+
+  const body = new FormData();
+  body.append("file", file);
+  const suffix = confirmDuplicate ? "?confirm_duplicate=true" : "";
+  const response = await fetch(`/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents/upload${suffix}`, {
+    method: "POST",
+    body,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 409 && payload.code === "duplicate_document") {
+    const duplicateName = payload.details?.duplicate?.display_name || "an existing document";
+    if (window.confirm(`${duplicateName} has the same content. Upload anyway?`)) {
+      await uploadSelectedDocument(true);
+    }
+    return;
+  }
+  if (!response.ok) {
+    message.textContent = payload.message || "Upload failed.";
+    return;
+  }
+  form.reset();
+  message.textContent = "Uploaded.";
+  await loadDocuments();
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 loadStatus();
 loadAuth().catch((error) => {

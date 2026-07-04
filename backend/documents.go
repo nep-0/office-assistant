@@ -1,0 +1,209 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	documentStatusUploaded = "uploaded"
+	maxUploadBytes         = 50 << 20
+)
+
+var supportedOfficeExtensions = map[string]bool{
+	".pdf":  true,
+	".docx": true,
+	".xlsx": true,
+	".pptx": true,
+	".png":  true,
+	".jpg":  true,
+	".jpeg": true,
+	".tif":  true,
+	".tiff": true,
+	".webp": true,
+}
+
+type documentResponse struct {
+	ID               int64  `json:"id"`
+	KnowledgeBaseID  int64  `json:"knowledge_base_id"`
+	OriginalFilename string `json:"original_filename"`
+	DisplayName      string `json:"display_name"`
+	ContentType      string `json:"content_type"`
+	SizeBytes        int64  `json:"size_bytes"`
+	SHA256           string `json:"sha256"`
+	Status           string `json:"status"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+type documentListResponse struct {
+	Documents []documentResponse `json:"documents"`
+}
+
+func (a *app) listDocuments(w http.ResponseWriter, r *http.Request) {
+	_, kb, ok := a.authorizedKnowledgeBase(w, r)
+	if !ok {
+		return
+	}
+	docs, err := a.store.listDocumentsForKnowledgeBase(r.Context(), kb.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load documents", nil)
+		return
+	}
+	res := documentListResponse{Documents: make([]documentResponse, 0, len(docs))}
+	for _, doc := range docs {
+		res.Documents = append(res.Documents, toDocumentResponse(doc))
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
+	current, kb, ok := a.authorizedKnowledgeBase(w, r)
+	if !ok {
+		return
+	}
+	if !canModifyKnowledgeBase(current, kb) {
+		writeError(w, http.StatusForbidden, "forbidden", "knowledge base write access required", nil)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "upload_invalid", "upload must include one supported file", nil)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "upload_file_required", "file field is required", nil)
+		return
+	}
+	defer file.Close()
+
+	originalFilename := cleanFilename(header.Filename)
+	if !supportedOfficeInput(originalFilename) {
+		writeError(w, http.StatusBadRequest, "unsupported_office_input", "file type is not supported", nil)
+		return
+	}
+
+	tempPath, hash, size, err := a.writeUploadTemp(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "upload_store_error", "could not store upload", nil)
+		return
+	}
+	defer os.Remove(tempPath)
+
+	duplicate, err := a.store.findDocumentDuplicateInKnowledgeBase(r.Context(), kb.ID, hash)
+	if err != nil && !notFound(err) {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not check duplicate document", nil)
+		return
+	}
+	if err == nil && r.URL.Query().Get("confirm_duplicate") != "true" {
+		writeError(w, http.StatusConflict, "duplicate_document", "matching content already exists in this knowledge base", map[string]any{
+			"duplicate": toDocumentResponse(duplicate),
+		})
+		return
+	}
+
+	storageKey, finalPath, err := a.newDocumentStoragePath()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "upload_store_error", "could not prepare document storage", nil)
+		return
+	}
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "upload_store_error", "could not store upload", nil)
+		return
+	}
+
+	contentType := header.Header.Get("Content-Type")
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "application/octet-stream"
+	}
+	doc, err := a.store.createDocument(r.Context(), documentRecord{
+		KnowledgeBaseID:  kb.ID,
+		OwnerID:          current.ID,
+		OriginalFilename: originalFilename,
+		DisplayName:      originalFilename,
+		ContentType:      contentType,
+		SizeBytes:        size,
+		SHA256:           hash,
+		StorageKey:       storageKey,
+		Status:           documentStatusUploaded,
+	})
+	if err != nil {
+		_ = os.Remove(finalPath)
+		writeError(w, http.StatusInternalServerError, "store_error", "could not create document record", nil)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toDocumentResponse(doc))
+}
+
+func (a *app) writeUploadTemp(file io.Reader) (string, string, int64, error) {
+	if err := os.MkdirAll(filepath.Join(a.config.storageRoot, "tmp"), 0o755); err != nil {
+		return "", "", 0, err
+	}
+	temp, err := os.CreateTemp(filepath.Join(a.config.storageRoot, "tmp"), "upload-*")
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer temp.Close()
+
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(temp, hasher), file)
+	if err != nil {
+		_ = os.Remove(temp.Name())
+		return "", "", 0, err
+	}
+	if written == 0 {
+		_ = os.Remove(temp.Name())
+		return "", "", 0, errors.New("empty upload")
+	}
+	return temp.Name(), hex.EncodeToString(hasher.Sum(nil)), written, nil
+}
+
+func (a *app) newDocumentStoragePath() (string, string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", "", err
+	}
+	storageKey := filepath.Join("documents", token, "original")
+	fullPath := filepath.Join(a.config.storageRoot, storageKey)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return "", "", err
+	}
+	return storageKey, fullPath, nil
+}
+
+func cleanFilename(filename string) string {
+	cleaned := filepath.Base(strings.TrimSpace(filename))
+	if cleaned == "." || cleaned == string(filepath.Separator) || cleaned == "" {
+		return "upload"
+	}
+	return cleaned
+}
+
+func supportedOfficeInput(filename string) bool {
+	return supportedOfficeExtensions[strings.ToLower(filepath.Ext(filename))]
+}
+
+func toDocumentResponse(doc documentRecord) documentResponse {
+	return documentResponse{
+		ID:               doc.ID,
+		KnowledgeBaseID:  doc.KnowledgeBaseID,
+		OriginalFilename: doc.OriginalFilename,
+		DisplayName:      doc.DisplayName,
+		ContentType:      doc.ContentType,
+		SizeBytes:        doc.SizeBytes,
+		SHA256:           doc.SHA256,
+		Status:           doc.Status,
+		CreatedAt:        doc.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:        doc.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}

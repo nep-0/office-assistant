@@ -36,6 +36,21 @@ type knowledgeBase struct {
 	UpdatedAt  time.Time
 }
 
+type documentRecord struct {
+	ID               int64
+	KnowledgeBaseID  int64
+	OwnerID          int64
+	OriginalFilename string
+	DisplayName      string
+	ContentType      string
+	SizeBytes        int64
+	SHA256           string
+	StorageKey       string
+	Status           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 func (s *store) Close() error {
 	return s.db.Close()
 }
@@ -80,6 +95,25 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
 
 CREATE INDEX IF NOT EXISTS knowledge_bases_owner_idx ON knowledge_bases(owner_user_id);
 CREATE INDEX IF NOT EXISTS knowledge_bases_visibility_idx ON knowledge_bases(visibility);
+
+CREATE TABLE IF NOT EXISTS documents (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	knowledge_base_id INTEGER NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+	owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	original_filename TEXT NOT NULL,
+	display_name TEXT NOT NULL,
+	content_type TEXT NOT NULL,
+	size_bytes INTEGER NOT NULL,
+	sha256 TEXT NOT NULL,
+	storage_key TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'uploaded',
+	deleted_at TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS documents_knowledge_base_idx ON documents(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS documents_hash_idx ON documents(knowledge_base_id, sha256);
 `)
 	return err
 }
@@ -275,6 +309,71 @@ WHERE id = ? AND deleted_at IS NULL
 	return err
 }
 
+func (s *store) createDocument(ctx context.Context, doc documentRecord) (documentRecord, error) {
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO documents (
+	knowledge_base_id,
+	owner_user_id,
+	original_filename,
+	display_name,
+	content_type,
+	size_bytes,
+	sha256,
+	storage_key,
+	status
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, doc.KnowledgeBaseID, doc.OwnerID, doc.OriginalFilename, doc.DisplayName, doc.ContentType, doc.SizeBytes, doc.SHA256, doc.StorageKey, doc.Status)
+	if err != nil {
+		return documentRecord{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return documentRecord{}, err
+	}
+	return s.findDocumentByID(ctx, id)
+}
+
+func (s *store) listDocumentsForKnowledgeBase(ctx context.Context, knowledgeBaseID int64) ([]documentRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+FROM documents
+WHERE knowledge_base_id = ? AND deleted_at IS NULL
+ORDER BY created_at DESC, id DESC
+`, knowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var docs []documentRecord
+	for rows.Next() {
+		doc, err := scanDocument(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (s *store) findDocumentDuplicateInKnowledgeBase(ctx context.Context, knowledgeBaseID int64, hash string) (documentRecord, error) {
+	return scanDocument(s.db.QueryRowContext(ctx, `
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+FROM documents
+WHERE knowledge_base_id = ? AND sha256 = ? AND deleted_at IS NULL
+ORDER BY created_at ASC
+LIMIT 1
+`, knowledgeBaseID, hash))
+}
+
+func (s *store) findDocumentByID(ctx context.Context, id int64) (documentRecord, error) {
+	return scanDocument(s.db.QueryRowContext(ctx, `
+SELECT id, knowledge_base_id, owner_user_id, original_filename, display_name, content_type, size_bytes, sha256, storage_key, status, created_at, updated_at
+FROM documents
+WHERE id = ? AND deleted_at IS NULL
+`, id))
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -325,6 +424,39 @@ func scanKnowledgeBase(row rowScanner) (knowledgeBase, error) {
 	kb.CreatedAt = created
 	kb.UpdatedAt = updated
 	return kb, nil
+}
+
+func scanDocument(row rowScanner) (documentRecord, error) {
+	var doc documentRecord
+	var createdAt string
+	var updatedAt string
+	if err := row.Scan(
+		&doc.ID,
+		&doc.KnowledgeBaseID,
+		&doc.OwnerID,
+		&doc.OriginalFilename,
+		&doc.DisplayName,
+		&doc.ContentType,
+		&doc.SizeBytes,
+		&doc.SHA256,
+		&doc.StorageKey,
+		&doc.Status,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return documentRecord{}, err
+	}
+	created, err := parseSQLiteTime(createdAt)
+	if err != nil {
+		return documentRecord{}, err
+	}
+	updated, err := parseSQLiteTime(updatedAt)
+	if err != nil {
+		return documentRecord{}, err
+	}
+	doc.CreatedAt = created
+	doc.UpdatedAt = updated
+	return doc, nil
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {

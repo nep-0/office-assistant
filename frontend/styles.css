@@ -176,6 +176,23 @@ button:hover {
   margin-top: 16px;
 }
 
+.document-panel {
+  border-top: 1px solid #d9e0e8;
+  margin-top: 22px;
+  padding-top: 18px;
+}
+
+.document-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.document-item {
+  border-top: 1px solid #e1e7ee;
+  padding-top: 12px;
+}
+
 .knowledge-base-item {
   align-items: center;
   border-top: 1px solid #e1e7ee;
@@ -217,5 +234,14 @@ button:hover {
 
   .workspace {
     padding: 22px;
+  }
+
+  .inline-form,
+  .knowledge-base-item {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledge-base-actions {
+    justify-content: start;
   }
 }
