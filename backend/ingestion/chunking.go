@@ -1,31 +1,33 @@
-package main
+package ingestion
 
 import (
 	"encoding/json"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"office-assistant/backend/domain"
 )
 
-const defaultMaxChunkRunes = 1800
+const DefaultMaxChunkRunes = 1800
 
 type ChunkingStrategy interface {
-	Chunk(markdown string, anchors []map[string]any) ([]documentChunk, error)
+	Chunk(markdown string, anchors []map[string]any) ([]domain.DocumentChunk, error)
 }
 
-type markdownChunkingStrategy struct {
+type MarkdownChunkingStrategy struct {
 	MaxRunes int
 }
 
 var markdownHeadingPattern = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
 
-func (s markdownChunkingStrategy) Chunk(markdown string, anchors []map[string]any) ([]documentChunk, error) {
+func (s MarkdownChunkingStrategy) Chunk(markdown string, anchors []map[string]any) ([]domain.DocumentChunk, error) {
 	maxRunes := s.MaxRunes
 	if maxRunes <= 0 {
-		maxRunes = defaultMaxChunkRunes
+		maxRunes = DefaultMaxChunkRunes
 	}
 	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
-	var chunks []documentChunk
+	var chunks []domain.DocumentChunk
 	var headingStack []string
 	var current strings.Builder
 	currentHeading := ""
@@ -40,12 +42,12 @@ func (s markdownChunkingStrategy) Chunk(markdown string, anchors []map[string]an
 		if err != nil {
 			return err
 		}
-		chunks = append(chunks, documentChunk{
+		chunks = append(chunks, domain.DocumentChunk{
 			ChunkNo:          len(chunks) + 1,
 			Content:          content,
 			HeadingPath:      currentHeading,
 			SourceAnchorJSON: anchorJSON,
-			TokenCount:       estimatedTokenCount(content),
+			TokenCount:       EstimatedTokenCount(content),
 		})
 		current.Reset()
 		return nil
@@ -82,11 +84,11 @@ func (s markdownChunkingStrategy) Chunk(markdown string, anchors []map[string]an
 		if err != nil {
 			return nil, err
 		}
-		chunks = append(chunks, documentChunk{
+		chunks = append(chunks, domain.DocumentChunk{
 			ChunkNo:          1,
 			Content:          strings.TrimSpace(markdown),
 			SourceAnchorJSON: anchorJSON,
-			TokenCount:       estimatedTokenCount(markdown),
+			TokenCount:       EstimatedTokenCount(markdown),
 		})
 	}
 	return chunks, nil
@@ -107,7 +109,7 @@ func chooseSourceAnchorJSON(anchors []map[string]any, chunkIndex int) (string, e
 	return string(data), nil
 }
 
-func estimatedTokenCount(content string) int {
+func EstimatedTokenCount(content string) int {
 	words := len(strings.Fields(content))
 	if words > 0 {
 		return words

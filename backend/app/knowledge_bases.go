@@ -1,30 +1,23 @@
-package main
+package app
 
 import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
+
+	authpkg "office-assistant/backend/auth"
+	"office-assistant/backend/domain"
+	knowledgepkg "office-assistant/backend/knowledge"
+	"office-assistant/backend/utils"
 )
 
 const (
-	visibilityPrivate = "private"
-	visibilityPublic  = "public"
+	visibilityPrivate = knowledgepkg.VisibilityPrivate
+	visibilityPublic  = knowledgepkg.VisibilityPublic
 )
 
-type knowledgeBaseResponse struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Visibility string `json:"visibility"`
-	OwnerID    int64  `json:"owner_id"`
-	OwnerName  string `json:"owner_name"`
-	CanWrite   bool   `json:"can_write"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at"`
-}
-
 type knowledgeBaseListResponse struct {
-	KnowledgeBases []knowledgeBaseResponse `json:"knowledge_bases"`
+	KnowledgeBases []knowledgepkg.Response `json:"knowledge_bases"`
 }
 
 type createKnowledgeBaseRequest struct {
@@ -41,12 +34,12 @@ func (a *app) listKnowledgeBases(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	bases, err := a.store.listKnowledgeBasesForUser(r.Context(), current)
+	bases, err := a.store.ListKnowledgeBasesForUser(r.Context(), current)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load knowledge bases", nil)
 		return
 	}
-	res := knowledgeBaseListResponse{KnowledgeBases: make([]knowledgeBaseResponse, 0, len(bases))}
+	res := knowledgeBaseListResponse{KnowledgeBases: make([]knowledgepkg.Response, 0, len(bases))}
 	for _, kb := range bases {
 		res.KnowledgeBases = append(res.KnowledgeBases, a.toKnowledgeBaseResponse(kb, current))
 	}
@@ -69,7 +62,7 @@ func (a *app) createKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kb, err := a.store.createKnowledgeBase(r.Context(), current.ID, name, visibilityPrivate)
+	kb, err := a.store.CreateKnowledgeBase(r.Context(), current.ID, name, visibilityPrivate)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not create knowledge base", nil)
 		return
@@ -107,7 +100,7 @@ func (a *app) updateKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	}
 	visibility := kb.Visibility
 	if req.Visibility != "" {
-		if current.Role != roleAdmin {
+		if current.Role != authpkg.RoleAdmin {
 			writeError(w, http.StatusForbidden, "forbidden", "admin role required to change knowledge base visibility", nil)
 			return
 		}
@@ -118,7 +111,7 @@ func (a *app) updateKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		visibility = req.Visibility
 	}
 
-	updated, err := a.store.updateKnowledgeBase(r.Context(), kb.ID, name, visibility)
+	updated, err := a.store.UpdateKnowledgeBase(r.Context(), kb.ID, name, visibility)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not update knowledge base", nil)
 		return
@@ -131,7 +124,7 @@ func (a *app) deleteKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if kb.Visibility == visibilityPublic && current.Role != roleAdmin {
+	if kb.Visibility == visibilityPublic && current.Role != authpkg.RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden", "admin role required to delete public knowledge bases", nil)
 		return
 	}
@@ -139,60 +132,51 @@ func (a *app) deleteKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "knowledge base write access required", nil)
 		return
 	}
-	if err := a.store.deleteKnowledgeBase(r.Context(), kb.ID); err != nil {
+	if err := a.store.DeleteKnowledgeBase(r.Context(), kb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not delete knowledge base", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (a *app) authorizedKnowledgeBase(w http.ResponseWriter, r *http.Request) (user, knowledgeBase, bool) {
+func (a *app) authorizedKnowledgeBase(w http.ResponseWriter, r *http.Request) (domain.User, domain.KnowledgeBase, bool) {
 	current, ok := a.currentUser(w, r)
 	if !ok {
-		return user{}, knowledgeBase{}, false
+		return domain.User{}, domain.KnowledgeBase{}, false
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeError(w, http.StatusNotFound, "knowledge_base_not_found", "knowledge base not found", nil)
-		return user{}, knowledgeBase{}, false
+		return domain.User{}, domain.KnowledgeBase{}, false
 	}
-	kb, err := a.store.findKnowledgeBaseByID(r.Context(), id)
+	kb, err := a.store.FindKnowledgeBaseByID(r.Context(), id)
 	if err != nil {
-		if notFound(err) {
+		if utils.NotFound(err) {
 			writeError(w, http.StatusNotFound, "knowledge_base_not_found", "knowledge base not found", nil)
-			return user{}, knowledgeBase{}, false
+			return domain.User{}, domain.KnowledgeBase{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load knowledge base", nil)
-		return user{}, knowledgeBase{}, false
+		return domain.User{}, domain.KnowledgeBase{}, false
 	}
 	if !canReadKnowledgeBase(current, kb) {
 		writeError(w, http.StatusNotFound, "knowledge_base_not_found", "knowledge base not found", nil)
-		return user{}, knowledgeBase{}, false
+		return domain.User{}, domain.KnowledgeBase{}, false
 	}
 	return current, kb, true
 }
 
-func (a *app) toKnowledgeBaseResponse(kb knowledgeBase, current user) knowledgeBaseResponse {
-	return knowledgeBaseResponse{
-		ID:         kb.ID,
-		Name:       kb.Name,
-		Visibility: kb.Visibility,
-		OwnerID:    kb.OwnerID,
-		OwnerName:  kb.OwnerName,
-		CanWrite:   canModifyKnowledgeBase(current, kb),
-		CreatedAt:  kb.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:  kb.UpdatedAt.UTC().Format(time.RFC3339),
-	}
+func (a *app) toKnowledgeBaseResponse(kb domain.KnowledgeBase, current domain.User) knowledgepkg.Response {
+	return knowledgepkg.ToResponse(kb, current)
 }
 
-func canReadKnowledgeBase(current user, kb knowledgeBase) bool {
-	return current.Role == roleAdmin || kb.Visibility == visibilityPublic || kb.OwnerID == current.ID
+func canReadKnowledgeBase(current domain.User, kb domain.KnowledgeBase) bool {
+	return knowledgepkg.CanRead(current, kb)
 }
 
-func canModifyKnowledgeBase(current user, kb knowledgeBase) bool {
-	return current.Role == roleAdmin || kb.OwnerID == current.ID
+func canModifyKnowledgeBase(current domain.User, kb domain.KnowledgeBase) bool {
+	return knowledgepkg.CanModify(current, kb)
 }
 
 func validVisibility(visibility string) bool {
-	return visibility == visibilityPrivate || visibility == visibilityPublic
+	return knowledgepkg.ValidVisibility(visibility)
 }

@@ -1,16 +1,18 @@
-package main
+package app
 
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
+
+	"office-assistant/backend/domain"
+	providerpkg "office-assistant/backend/providers"
 )
 
 const (
-	providerPurposeChat      = "chat"
-	providerPurposeEmbedding = "embedding"
+	providerPurposeChat      = providerpkg.PurposeChat
+	providerPurposeEmbedding = providerpkg.PurposeEmbedding
 )
 
 type providerSettingResponse struct {
@@ -37,7 +39,7 @@ func (a *app) getProviderSettings(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	settings, err := a.store.listProviderSettings(r.Context())
+	settings, err := a.store.ListProviderSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load provider settings", nil)
 		return
@@ -67,13 +69,13 @@ func (a *app) updateProviderSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	current, err := a.store.findProviderSetting(r.Context(), purpose)
+	current, err := a.store.FindProviderSetting(r.Context(), purpose)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load provider setting", nil)
 		return
 	}
 
-	next := providerSetting{
+	next := domain.ProviderSetting{
 		Purpose: purpose,
 		BaseURL: strings.TrimSpace(req.BaseURL),
 		Model:   strings.TrimSpace(req.Model),
@@ -90,17 +92,17 @@ func (a *app) updateProviderSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := a.store.updateProviderSetting(r.Context(), next)
+	updated, err := a.store.UpdateProviderSetting(r.Context(), next)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not update provider setting", nil)
 		return
 	}
-	_ = a.store.appendActivity(r.Context(), currentUser.ID, "provider_setting_changed", "provider", purpose, map[string]any{"base_url": updated.BaseURL, "model": updated.Model, "api_key_set": updated.APIKey != ""})
+	_ = a.store.AppendActivity(r.Context(), currentUser.ID, "provider_setting_changed", "provider", purpose, map[string]any{"base_url": updated.BaseURL, "model": updated.Model, "api_key_set": updated.APIKey != ""})
 	writeJSON(w, http.StatusOK, maskProviderSetting(updated))
 }
 
 func (a *app) providerDependencyStatus(purpose string) dependencyStatus {
-	setting, err := a.store.findProviderSetting(context.Background(), purpose)
+	setting, err := a.store.FindProviderSetting(context.Background(), purpose)
 	if err != nil {
 		return dependencyStatus{Status: "degraded", Mode: "missing"}
 	}
@@ -127,47 +129,24 @@ func (err providerValidationError) Error() string {
 	return err.code
 }
 
-func validateProviderSetting(setting providerSetting) *providerValidationError {
-	if !validProviderPurpose(setting.Purpose) {
-		return &providerValidationError{code: "provider_not_found", message: "provider purpose not found"}
-	}
-	if strings.TrimSpace(setting.BaseURL) == "" {
-		return &providerValidationError{code: "provider_base_url_required", message: "provider base URL is required"}
-	}
-	parsed, err := url.Parse(setting.BaseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return &providerValidationError{code: "provider_base_url_invalid", message: "provider base URL must be an absolute HTTP URL"}
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return &providerValidationError{code: "provider_base_url_invalid", message: "provider base URL must use HTTP or HTTPS"}
-	}
-	if strings.TrimSpace(setting.Model) == "" {
-		return &providerValidationError{code: "provider_model_required", message: "provider model is required"}
+func validateProviderSetting(setting domain.ProviderSetting) *providerValidationError {
+	if err := providerpkg.ValidateSetting(setting); err != nil {
+		return &providerValidationError{code: err.Code, message: err.Message}
 	}
 	return nil
 }
 
 func validProviderPurpose(purpose string) bool {
-	return purpose == providerPurposeChat || purpose == providerPurposeEmbedding
+	return providerpkg.ValidPurpose(purpose)
 }
 
-func maskProviderSetting(setting providerSetting) providerSettingResponse {
+func maskProviderSetting(setting domain.ProviderSetting) providerSettingResponse {
 	return providerSettingResponse{
 		Purpose:    setting.Purpose,
 		BaseURL:    setting.BaseURL,
 		Model:      setting.Model,
 		APIKeySet:  setting.APIKey != "",
-		APIKeyMask: maskSecret(setting.APIKey),
+		APIKeyMask: providerpkg.MaskSecret(setting.APIKey),
 		UpdatedAt:  setting.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-}
-
-func maskSecret(secret string) string {
-	if secret == "" {
-		return ""
-	}
-	if len(secret) <= 4 {
-		return "****"
-	}
-	return "****" + secret[len(secret)-4:]
 }

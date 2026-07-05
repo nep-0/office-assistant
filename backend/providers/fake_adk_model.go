@@ -1,4 +1,4 @@
-package main
+package providers
 
 import (
 	"context"
@@ -10,18 +10,28 @@ import (
 	"google.golang.org/genai"
 )
 
-type fakeADKModel struct {
-	name string
+type FakeADKModel struct {
+	name              string
+	retrievalToolName string
+	maxRetrievalLimit int
 }
 
-func (m fakeADKModel) Name() string {
+func NewFakeADKModel(name, retrievalToolName string, maxRetrievalLimit int) FakeADKModel {
+	return FakeADKModel{
+		name:              name,
+		retrievalToolName: retrievalToolName,
+		maxRetrievalLimit: maxRetrievalLimit,
+	}
+}
+
+func (m FakeADKModel) Name() string {
 	if m.name == "" {
 		return "fake-chat"
 	}
 	return m.name
 }
 
-func (m fakeADKModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m FakeADKModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if ctx.Err() != nil {
 			yield(nil, ctx.Err())
@@ -31,21 +41,21 @@ func (m fakeADKModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("Ungrounded answer.", genai.RoleModel)}, nil)
 			return
 		}
-		if !hasFunctionResponse(req.Contents, retrievalToolName) {
+		if !hasFunctionResponse(req.Contents, m.retrievalToolName) {
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role: genai.RoleModel,
 					Parts: []*genai.Part{
-						genai.NewPartFromFunctionCall(retrievalToolName, map[string]any{
+						genai.NewPartFromFunctionCall(m.retrievalToolName, map[string]any{
 							"query": latestUserText(req.Contents),
-							"limit": maxRetrievalLimit,
+							"limit": m.maxRetrievalLimit,
 						}),
 					},
 				},
 			}, nil)
 			return
 		}
-		text := "Based on the retrieved Knowledge Base evidence, " + summarizeFunctionResponse(req.Contents)
+		text := "Based on the retrieved Knowledge Base evidence, " + m.summarizeFunctionResponse(req.Contents)
 		if !stream {
 			yield(&model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)}, nil)
 			return
@@ -95,10 +105,10 @@ func latestUserText(contents []*genai.Content) string {
 	return "knowledge base question"
 }
 
-func summarizeFunctionResponse(contents []*genai.Content) string {
+func (m FakeADKModel) summarizeFunctionResponse(contents []*genai.Content) string {
 	for i := len(contents) - 1; i >= 0; i-- {
 		for _, part := range contents[i].Parts {
-			if part.FunctionResponse == nil || part.FunctionResponse.Name != retrievalToolName {
+			if part.FunctionResponse == nil || part.FunctionResponse.Name != m.retrievalToolName {
 				continue
 			}
 			if results, ok := part.FunctionResponse.Response["results"].([]any); ok && len(results) == 0 {

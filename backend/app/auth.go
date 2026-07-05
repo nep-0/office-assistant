@@ -1,22 +1,14 @@
-package main
+package app
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-)
-
-const (
-	roleAdmin     = "admin"
-	roleMember    = "member"
-	sessionCookie = "oa_session"
-	sessionTTL    = 24 * time.Hour
+	authpkg "office-assistant/backend/auth"
+	"office-assistant/backend/domain"
+	"office-assistant/backend/utils"
 )
 
 type setupStatusResponse struct {
@@ -39,7 +31,7 @@ type authResponse struct {
 }
 
 func (a *app) setupStatus(w http.ResponseWriter, r *http.Request) {
-	count, err := a.store.countUsers(r.Context())
+	count, err := a.store.CountUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not inspect setup state", nil)
 		return
@@ -54,7 +46,7 @@ func (a *app) createFirstAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := a.store.countUsers(r.Context())
+	count, err := a.store.CountUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not inspect setup state", nil)
 		return
@@ -64,12 +56,12 @@ func (a *app) createFirstAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := a.createUserWithPassword(r, req.Username, req.Password, roleAdmin)
+	created, err := a.createUserWithPassword(r, req.Username, req.Password, authpkg.RoleAdmin)
 	if err != nil {
 		writeAuthCreateError(w, err)
 		return
 	}
-	_ = a.store.appendActivity(r.Context(), created.ID, "user_created", "user", strconv.FormatInt(created.ID, 10), map[string]any{"role": created.Role, "first_admin": true})
+	_ = a.store.AppendActivity(r.Context(), created.ID, "user_created", "user", strconv.FormatInt(created.ID, 10), map[string]any{"role": created.Role, "first_admin": true})
 
 	if err := a.issueSession(w, r, created); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "could not create session", nil)
@@ -85,18 +77,18 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := a.store.findUserByUsername(r.Context(), normalizeUsername(req.Username))
+	found, err := a.store.FindUserByUsername(r.Context(), normalizeUsername(req.Username))
 	if err != nil {
-		if notFound(err) {
-			_ = a.store.appendActivity(r.Context(), 0, "login_failed", "user", normalizeUsername(req.Username), map[string]any{"reason": "unknown_user"})
+		if utils.NotFound(err) {
+			_ = a.store.AppendActivity(r.Context(), 0, "login_failed", "user", normalizeUsername(req.Username), map[string]any{"reason": "unknown_user"})
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "username or password is incorrect", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load user", nil)
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(found.PasswordHash), []byte(req.Password)) != nil {
-		_ = a.store.appendActivity(r.Context(), found.ID, "login_failed", "user", strconv.FormatInt(found.ID, 10), map[string]any{"reason": "bad_password"})
+	if !authpkg.CheckPassword(found.PasswordHash, req.Password) {
+		_ = a.store.AppendActivity(r.Context(), found.ID, "login_failed", "user", strconv.FormatInt(found.ID, 10), map[string]any{"reason": "bad_password"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "username or password is incorrect", nil)
 		return
 	}
@@ -108,8 +100,8 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		_ = a.store.deleteSession(r.Context(), cookie.Value)
+	if cookie, err := r.Cookie(authpkg.SessionCookie); err == nil {
+		_ = a.store.DeleteSession(r.Context(), cookie.Value)
 	}
 	http.SetCookie(w, expiredSessionCookie())
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -127,34 +119,34 @@ func (a *app) adminStatus(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": roleAdmin})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": authpkg.RoleAdmin})
 }
 
-func (a *app) requireAdmin(w http.ResponseWriter, r *http.Request) (user, bool) {
+func (a *app) requireAdmin(w http.ResponseWriter, r *http.Request) (domain.User, bool) {
 	current, ok := a.currentUser(w, r)
 	if !ok {
-		return user{}, false
+		return domain.User{}, false
 	}
-	if current.Role != roleAdmin {
+	if current.Role != authpkg.RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden", "admin role required", nil)
-		return user{}, false
+		return domain.User{}, false
 	}
 	return current, true
 }
 
-func (a *app) createUserWithPassword(r *http.Request, username, password, role string) (user, error) {
+func (a *app) createUserWithPassword(r *http.Request, username, password, role string) (domain.User, error) {
 	username = normalizeUsername(username)
 	if username == "" {
-		return user{}, errors.New("username_required")
+		return domain.User{}, errors.New("username_required")
 	}
 	if len(password) < 8 {
-		return user{}, errors.New("password_too_short")
+		return domain.User{}, errors.New("password_too_short")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := authpkg.HashPassword(password)
 	if err != nil {
-		return user{}, err
+		return domain.User{}, err
 	}
-	return a.store.createUser(r.Context(), username, string(hash), role)
+	return a.store.CreateUser(r.Context(), username, hash, role)
 }
 
 func writeAuthCreateError(w http.ResponseWriter, err error) {
@@ -168,74 +160,54 @@ func writeAuthCreateError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (a *app) issueSession(w http.ResponseWriter, r *http.Request, u user) error {
+func (a *app) issueSession(w http.ResponseWriter, r *http.Request, u domain.User) error {
 	token, err := randomToken()
 	if err != nil {
 		return err
 	}
-	expiresAt := time.Now().UTC().Add(sessionTTL)
-	if err := a.store.createSession(r.Context(), token, u.ID, expiresAt); err != nil {
+	expiresAt := time.Now().UTC().Add(authpkg.SessionTTL)
+	if err := a.store.CreateSession(r.Context(), token, u.ID, expiresAt); err != nil {
 		return err
 	}
 	http.SetCookie(w, activeSessionCookie(token, expiresAt))
 	return nil
 }
 
-func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (user, bool) {
-	cookie, err := r.Cookie(sessionCookie)
+func (a *app) currentUser(w http.ResponseWriter, r *http.Request) (domain.User, bool) {
+	cookie, err := r.Cookie(authpkg.SessionCookie)
 	if err != nil || cookie.Value == "" {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "login required", nil)
-		return user{}, false
+		return domain.User{}, false
 	}
-	current, err := a.store.findUserBySession(r.Context(), cookie.Value, time.Now().UTC())
+	current, err := a.store.FindUserBySession(r.Context(), cookie.Value, time.Now().UTC())
 	if err != nil {
-		if notFound(err) {
+		if utils.NotFound(err) {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "login required", nil)
-			return user{}, false
+			return domain.User{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load session", nil)
-		return user{}, false
+		return domain.User{}, false
 	}
 	return current, true
 }
 
 func activeSessionCookie(token string, expiresAt time.Time) *http.Cookie {
-	return &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		Expires:  expiresAt,
-		MaxAge:   int(time.Until(expiresAt).Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
+	return authpkg.ActiveSessionCookie(token, expiresAt)
 }
 
 func expiredSessionCookie() *http.Cookie {
-	return &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
+	return authpkg.ExpiredSessionCookie()
 }
 
 func randomToken() (string, error) {
-	var data [32]byte
-	if _, err := rand.Read(data[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(data[:]), nil
+	return authpkg.RandomToken()
 }
 
 func normalizeUsername(username string) string {
-	return strings.ToLower(strings.TrimSpace(username))
+	return authpkg.NormalizeUsername(username)
 }
 
-func toAuthUser(u user) authUserResponse {
+func toAuthUser(u domain.User) authUserResponse {
 	return authUserResponse{
 		ID:       u.ID,
 		Username: u.Username,

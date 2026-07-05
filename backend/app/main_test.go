@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -15,6 +15,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	authpkg "office-assistant/backend/auth"
+	chatpkg "office-assistant/backend/chat"
+	docpkg "office-assistant/backend/documents"
+	"office-assistant/backend/domain"
+	"office-assistant/backend/httpapi"
+	ingestionpkg "office-assistant/backend/ingestion"
+	knowledgepkg "office-assistant/backend/knowledge"
+	"office-assistant/backend/providers"
+	"office-assistant/backend/search"
+	"office-assistant/backend/utils"
 )
 
 func TestHealth(t *testing.T) {
@@ -80,7 +91,7 @@ func TestFirstRunSetupCreatesAdminAndSession(t *testing.T) {
 	if created.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, created.Code, created.Body.String())
 	}
-	cookie := findCookie(t, created, sessionCookie)
+	cookie := findCookie(t, created, authpkg.SessionCookie)
 	if !cookie.HttpOnly {
 		t.Fatal("expected session cookie to be HTTP-only")
 	}
@@ -91,7 +102,7 @@ func TestFirstRunSetupCreatesAdminAndSession(t *testing.T) {
 	}
 	var auth authResponse
 	decodeRecorder(t, me, &auth)
-	if auth.User.Username != "admin" || auth.User.Role != roleAdmin {
+	if auth.User.Username != "admin" || auth.User.Role != authpkg.RoleAdmin {
 		t.Fatalf("unexpected user: %+v", auth.User)
 	}
 
@@ -104,13 +115,13 @@ func TestFirstRunSetupCreatesAdminAndSession(t *testing.T) {
 
 func TestLoginLogoutAndProtectedAdminRoute(t *testing.T) {
 	a := newTestApp(t)
-	createUserForTest(t, a, "admin", "password123", roleAdmin)
+	createUserForTest(t, a, "admin", "password123", authpkg.RoleAdmin)
 
 	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"admin","password":"password123"}`)
 	if login.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, login.Code, login.Body.String())
 	}
-	cookie := findCookie(t, login, sessionCookie)
+	cookie := findCookie(t, login, authpkg.SessionCookie)
 
 	admin := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/status", "", cookie)
 	if admin.Code != http.StatusOK {
@@ -130,20 +141,20 @@ func TestLoginLogoutAndProtectedAdminRoute(t *testing.T) {
 
 func TestMemberCannotUseAdminRoute(t *testing.T) {
 	a := newTestApp(t)
-	createUserForTest(t, a, "member", "password123", roleMember)
+	createUserForTest(t, a, "member", "password123", authpkg.RoleMember)
 
 	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"member","password":"password123"}`)
 	if login.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, login.Code, login.Body.String())
 	}
-	cookie := findCookie(t, login, sessionCookie)
+	cookie := findCookie(t, login, authpkg.SessionCookie)
 
 	admin := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/status", "", cookie)
 	if admin.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, admin.Code)
 	}
 
-	var body apiError
+	var body httpapi.APIError
 	decodeRecorder(t, admin, &body)
 	if body.Code != "forbidden" {
 		t.Fatalf("expected stable forbidden code, got %+v", body)
@@ -152,14 +163,14 @@ func TestMemberCannotUseAdminRoute(t *testing.T) {
 
 func TestInvalidLoginReturnsStructuredError(t *testing.T) {
 	a := newTestApp(t)
-	createUserForTest(t, a, "admin", "password123", roleAdmin)
+	createUserForTest(t, a, "admin", "password123", authpkg.RoleAdmin)
 
 	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"admin","password":"wrong"}`)
 	if login.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, login.Code)
 	}
 
-	var body apiError
+	var body httpapi.APIError
 	decodeRecorder(t, login, &body)
 	if body.Code != "invalid_credentials" || body.Message == "" {
 		t.Fatalf("expected structured error, got %+v", body)
@@ -168,7 +179,7 @@ func TestInvalidLoginReturnsStructuredError(t *testing.T) {
 
 func TestAdminCanListMaskedProviderSettings(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "admin", roleAdmin)
+	cookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
 
 	res := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/provider-settings", "", cookie)
 	if res.Code != http.StatusOK {
@@ -192,7 +203,7 @@ func TestAdminCanListMaskedProviderSettings(t *testing.T) {
 
 func TestProviderSettingsRequireAdmin(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 
 	res := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/provider-settings", "", cookie)
 	if res.Code != http.StatusForbidden {
@@ -202,7 +213,7 @@ func TestProviderSettingsRequireAdmin(t *testing.T) {
 
 func TestAdminCanSwitchProviderAndSecretIsMasked(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "admin", roleAdmin)
+	cookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
 
 	res := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/provider-settings/chat", `{
 		"base_url":"https://api.example.test/v1",
@@ -237,7 +248,7 @@ func TestAdminCanSwitchProviderAndSecretIsMasked(t *testing.T) {
 
 func TestProviderSettingValidation(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "admin", roleAdmin)
+	cookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
 
 	res := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/provider-settings/chat", `{
 		"base_url":"file:///tmp/model",
@@ -246,7 +257,7 @@ func TestProviderSettingValidation(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, res.Code)
 	}
-	var body apiError
+	var body httpapi.APIError
 	decodeRecorder(t, res, &body)
 	if body.Code != "provider_base_url_invalid" {
 		t.Fatalf("expected provider_base_url_invalid, got %+v", body)
@@ -255,8 +266,8 @@ func TestProviderSettingValidation(t *testing.T) {
 
 func TestAdminObservabilityRecordsActivityAndDebugMode(t *testing.T) {
 	a := newTestApp(t)
-	adminCookie := loginAs(t, a, "admin", roleAdmin)
-	createUserForTest(t, a, "member", "password123", roleMember)
+	adminCookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
+	createUserForTest(t, a, "member", "password123", authpkg.RoleMember)
 	failed := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"member","password":"wrong"}`)
 	if failed.Code != http.StatusUnauthorized {
 		t.Fatalf("expected failed login status %d, got %d", http.StatusUnauthorized, failed.Code)
@@ -276,8 +287,8 @@ func TestAdminObservabilityRecordsActivityAndDebugMode(t *testing.T) {
 
 func TestMetricsAndCorrelationID(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "admin", roleAdmin)
-	if err := a.store.recordMetric(context.Background(), "test_metric", 25*time.Millisecond, 2, map[string]any{"ok": true}); err != nil {
+	cookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
+	if err := a.store.RecordMetric(context.Background(), "test_metric", 25*time.Millisecond, 2, map[string]any{"ok": true}); err != nil {
 		t.Fatalf("record metric: %v", err)
 	}
 	metrics := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/metrics", "", cookie)
@@ -293,7 +304,7 @@ func TestMetricsAndCorrelationID(t *testing.T) {
 	res := httptest.NewRecorder()
 	mux := http.NewServeMux()
 	a.routes(mux)
-	withCorrelation(mux).ServeHTTP(res, req)
+	httpapi.WithCorrelation(mux).ServeHTTP(res, req)
 	if res.Header().Get("X-Request-ID") != "test-correlation" {
 		t.Fatalf("expected correlation header, got %q", res.Header().Get("X-Request-ID"))
 	}
@@ -301,13 +312,13 @@ func TestMetricsAndCorrelationID(t *testing.T) {
 
 func TestMemberCanManageOwnPrivateKnowledgeBases(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 
 	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Finance"}`, cookie)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, created.Code, created.Body.String())
 	}
-	var kb knowledgeBaseResponse
+	var kb knowledgepkg.Response
 	decodeRecorder(t, created, &kb)
 	if kb.Name != "Finance" || kb.Visibility != visibilityPrivate || !kb.CanWrite {
 		t.Fatalf("unexpected knowledge base: %+v", kb)
@@ -337,11 +348,11 @@ func TestMemberCanManageOwnPrivateKnowledgeBases(t *testing.T) {
 
 func TestMemberCannotReadOrMutateOtherPrivateKnowledgeBase(t *testing.T) {
 	a := newTestApp(t)
-	ownerCookie := loginAs(t, a, "owner", roleMember)
-	otherCookie := loginAs(t, a, "other", roleMember)
+	ownerCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	otherCookie := loginAs(t, a, "other", authpkg.RoleMember)
 
 	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Private"}`, ownerCookie)
-	var kb knowledgeBaseResponse
+	var kb knowledgepkg.Response
 	decodeRecorder(t, created, &kb)
 
 	read := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), "", otherCookie)
@@ -356,12 +367,12 @@ func TestMemberCannotReadOrMutateOtherPrivateKnowledgeBase(t *testing.T) {
 
 func TestAdminCanMakeKnowledgeBasePublicAndMembersCanReadIt(t *testing.T) {
 	a := newTestApp(t)
-	ownerCookie := loginAs(t, a, "owner", roleMember)
-	adminCookie := loginAs(t, a, "admin", roleAdmin)
-	readerCookie := loginAs(t, a, "reader", roleMember)
+	ownerCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	adminCookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
+	readerCookie := loginAs(t, a, "reader", authpkg.RoleMember)
 
 	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Shared"}`, ownerCookie)
-	var kb knowledgeBaseResponse
+	var kb knowledgepkg.Response
 	decodeRecorder(t, created, &kb)
 
 	published := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Shared","visibility":"public"}`, adminCookie)
@@ -381,10 +392,10 @@ func TestAdminCanMakeKnowledgeBasePublicAndMembersCanReadIt(t *testing.T) {
 
 func TestMemberCannotMakeKnowledgeBasePublic(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 
 	created := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"Private"}`, cookie)
-	var kb knowledgeBaseResponse
+	var kb knowledgepkg.Response
 	decodeRecorder(t, created, &kb)
 
 	res := performJSONWithCookie(t, a, http.MethodPut, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10), `{"name":"Private","visibility":"public"}`, cookie)
@@ -395,14 +406,14 @@ func TestMemberCannotMakeKnowledgeBasePublic(t *testing.T) {
 
 func TestUploadStoresDocumentMetadata(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
 
 	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("quarterly report"), false)
 	if uploaded.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, uploaded.Code, uploaded.Body.String())
 	}
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 	if doc.OriginalFilename != "report.pdf" || doc.DisplayName != "report.pdf" || doc.SizeBytes != int64(len("quarterly report")) {
 		t.Fatalf("unexpected document metadata: %+v", doc)
@@ -424,7 +435,7 @@ func TestUploadStoresDocumentMetadata(t *testing.T) {
 
 func TestUploadDuplicateWarnsBeforeCreatingDocument(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
 
 	first := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("same content"), false)
@@ -436,7 +447,7 @@ func TestUploadDuplicateWarnsBeforeCreatingDocument(t *testing.T) {
 	if duplicate.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, duplicate.Code, duplicate.Body.String())
 	}
-	var apiErr apiError
+	var apiErr httpapi.APIError
 	decodeRecorder(t, duplicate, &apiErr)
 	if apiErr.Code != "duplicate_document" || apiErr.Details["duplicate"] == nil {
 		t.Fatalf("expected duplicate details, got %+v", apiErr)
@@ -457,8 +468,8 @@ func TestUploadDuplicateWarnsBeforeCreatingDocument(t *testing.T) {
 
 func TestUploadRequiresKnowledgeBaseWriteAccess(t *testing.T) {
 	a := newTestApp(t)
-	ownerCookie := loginAs(t, a, "owner", roleMember)
-	otherCookie := loginAs(t, a, "other", roleMember)
+	ownerCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	otherCookie := loginAs(t, a, "other", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, ownerCookie, "Private")
 
 	res := uploadFile(t, a, otherCookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
@@ -469,8 +480,8 @@ func TestUploadRequiresKnowledgeBaseWriteAccess(t *testing.T) {
 
 func TestDuplicateDetectionDoesNotLeakOtherPrivateKnowledgeBases(t *testing.T) {
 	a := newTestApp(t)
-	ownerCookie := loginAs(t, a, "owner", roleMember)
-	otherCookie := loginAs(t, a, "other", roleMember)
+	ownerCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	otherCookie := loginAs(t, a, "other", authpkg.RoleMember)
 	ownerKB := createKnowledgeBaseForTest(t, a, ownerCookie, "Owner")
 	otherKB := createKnowledgeBaseForTest(t, a, otherCookie, "Other")
 
@@ -496,10 +507,10 @@ func TestIngestionJobStoresExtractedMarkdownArtifact(t *testing.T) {
 		"ocr":{"used":false},
 		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
 	}`)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 
 	processed, err := a.processNextIngestionJob(context.Background())
@@ -510,7 +521,7 @@ func TestIngestionJobStoresExtractedMarkdownArtifact(t *testing.T) {
 		t.Fatal("expected one ingestion job to be processed")
 	}
 
-	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	stored, err := a.store.FindDocumentByID(context.Background(), doc.ID)
 	if err != nil {
 		t.Fatalf("load document: %v", err)
 	}
@@ -540,10 +551,10 @@ func TestDocumentSearchIndexesExtractedText(t *testing.T) {
 		"ocr":{"used":false},
 		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
 	}`)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Searchable")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "plan.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 
 	processed, err := a.processNextIngestionJob(context.Background())
@@ -576,15 +587,15 @@ func TestDocumentDeleteRemovesIndexedChunksFromVectorSearch(t *testing.T) {
 		"ocr":{"used":false},
 		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
 	}`)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Delete")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "delete.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
 		t.Fatalf("process ingestion processed=%v err=%v", processed, err)
 	}
-	before, err := a.vectorIndex.search(context.Background(), "tombstone retrieval", 5)
+	before, err := a.vectorIndex.Search(context.Background(), "tombstone retrieval", 5)
 	if err != nil {
 		t.Fatalf("vector search before delete: %v", err)
 	}
@@ -596,7 +607,7 @@ func TestDocumentDeleteRemovesIndexedChunksFromVectorSearch(t *testing.T) {
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, deleted.Code, deleted.Body.String())
 	}
-	after, err := a.vectorIndex.search(context.Background(), "tombstone retrieval", 5)
+	after, err := a.vectorIndex.Search(context.Background(), "tombstone retrieval", 5)
 	if err != nil {
 		t.Fatalf("vector search after delete: %v", err)
 	}
@@ -607,15 +618,15 @@ func TestDocumentDeleteRemovesIndexedChunksFromVectorSearch(t *testing.T) {
 
 func TestVectorIndexPersistsWithoutStartupRebuild(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Persistent Vectors")
 	insertIndexedDocumentForTest(t, a, kb.ID, "persist.pdf", "persistent vector evidence")
 
-	reloaded, err := newVectorIndex(a.embeddingFunc(), a.config.storageRoot)
+	reloaded, err := search.NewVectorIndex(a.embeddingFunc(), a.config.storageRoot)
 	if err != nil {
 		t.Fatalf("reload vector index: %v", err)
 	}
-	results, err := reloaded.search(context.Background(), "persistent vector", 5)
+	results, err := reloaded.Search(context.Background(), "persistent vector", 5)
 	if err != nil {
 		t.Fatalf("search persisted vector index: %v", err)
 	}
@@ -645,10 +656,10 @@ func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
 			"source_anchors":[{"id":"page-2","kind":"page","label":"Page 2"}]
 		}`,
 	})
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Reprocess")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "reprocess.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 	if processed, err := a.processNextIngestionJob(context.Background()); err != nil || !processed {
 		t.Fatalf("first ingestion processed=%v err=%v", processed, err)
@@ -657,7 +668,7 @@ func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
 	if reprocess.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, reprocess.Code, reprocess.Body.String())
 	}
-	pendingResults, err := a.vectorIndex.search(context.Background(), "Old searchable", 5)
+	pendingResults, err := a.vectorIndex.Search(context.Background(), "Old searchable", 5)
 	if err != nil {
 		t.Fatalf("pending reprocess vector search: %v", err)
 	}
@@ -668,7 +679,7 @@ func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
 		t.Fatalf("second ingestion processed=%v err=%v", processed, err)
 	}
 
-	oldResults, err := a.vectorIndex.search(context.Background(), "Old searchable", 5)
+	oldResults, err := a.vectorIndex.Search(context.Background(), "Old searchable", 5)
 	if err != nil {
 		t.Fatalf("old vector search: %v", err)
 	}
@@ -677,7 +688,7 @@ func TestDocumentReprocessSupersedesOldChunksAfterSuccess(t *testing.T) {
 			t.Fatalf("expected old chunks to be superseded, got %+v", oldResults)
 		}
 	}
-	newResults, err := a.vectorIndex.search(context.Background(), "New replacement", 5)
+	newResults, err := a.vectorIndex.Search(context.Background(), "New replacement", 5)
 	if err != nil {
 		t.Fatalf("new vector search: %v", err)
 	}
@@ -697,7 +708,7 @@ func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
 		"ocr":{"used":false},
 		"source_anchors":[{"id":"page-1","kind":"page","label":"Page 1"}]
 	}`)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Policies")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "policy.pdf", "application/pdf", []byte("content"), false)
 	if uploaded.Code != http.StatusCreated {
@@ -734,7 +745,7 @@ func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
 	if previewBody.DocumentName != "policy.pdf" || !strings.Contains(previewBody.Text, "Remote work") || previewBody.OriginalDownloadURL == "" {
 		t.Fatalf("unexpected citation preview: %+v", previewBody)
 	}
-	messages, err := a.store.listChatMessages(context.Background(), start.SessionID, 10)
+	messages, err := a.store.ListChatMessages(context.Background(), start.SessionID, 10)
 	if err != nil {
 		t.Fatalf("list chat messages: %v", err)
 	}
@@ -745,7 +756,7 @@ func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
 
 func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	firstKB := createKnowledgeBaseForTest(t, a, cookie, "First")
 	secondKB := createKnowledgeBaseForTest(t, a, cookie, "Second")
 	insertIndexedDocumentForTest(t, a, firstKB.ID, "first.pdf", "shared search term first-only")
@@ -767,7 +778,7 @@ func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
 func TestKnowledgeBaseChatStreamingErrorWhenRetrievalFails(t *testing.T) {
 	a := newTestApp(t)
 	a.vectorIndex = nil
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Broken")
 
 	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"Will retrieval fail?"}`, cookie)
@@ -782,15 +793,15 @@ func TestKnowledgeBaseChatStreamingErrorWhenRetrievalFails(t *testing.T) {
 
 func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
 	a := newTestApp(t)
-	current, err := a.store.findProviderSetting(context.Background(), providerPurposeChat)
+	current, err := a.store.FindProviderSetting(context.Background(), providerPurposeChat)
 	if err != nil {
 		t.Fatalf("load provider setting: %v", err)
 	}
 	current.Model = "fake-no-retrieval"
-	if _, err := a.store.updateProviderSetting(context.Background(), current); err != nil {
+	if _, err := a.store.UpdateProviderSetting(context.Background(), current); err != nil {
 		t.Fatalf("update provider setting: %v", err)
 	}
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "No Retrieval")
 
 	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"Answer without retrieval"}`, cookie)
@@ -805,8 +816,8 @@ func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
 
 func TestCitationPreviewAuthorization(t *testing.T) {
 	a := newTestApp(t)
-	ownerCookie := loginAs(t, a, "owner", roleMember)
-	otherCookie := loginAs(t, a, "other", roleMember)
+	ownerCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	otherCookie := loginAs(t, a, "other", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, ownerCookie, "Private")
 	insertIndexedDocumentForTest(t, a, kb.ID, "private.pdf", "private source text")
 	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"private source"}`, ownerCookie)
@@ -831,7 +842,7 @@ func TestCitationPreviewAuthorization(t *testing.T) {
 
 func TestKnowledgeBaseChatUnsupportedAnswerHasNoCitations(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Empty")
 
 	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"What is missing?"}`, cookie)
@@ -845,7 +856,7 @@ func TestKnowledgeBaseChatUnsupportedAnswerHasNoCitations(t *testing.T) {
 	if strings.Contains(events["citations"][0], "citation_id") {
 		t.Fatalf("expected no fake citations, got %s", events["citations"][0])
 	}
-	messages, err := a.store.listChatMessages(context.Background(), mustSessionIDFromEvents(t, events), 10)
+	messages, err := a.store.ListChatMessages(context.Background(), mustSessionIDFromEvents(t, events), 10)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
@@ -861,10 +872,10 @@ func TestIngestionFailureRetriesThenFails(t *testing.T) {
 	a := newTestApp(t)
 	a.config.documentURL = "http://document.test"
 	a.httpClient = fakeDocumentClient(http.StatusInternalServerError, `{"error":"temporary"}`)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 
 	for range 3 {
@@ -877,14 +888,14 @@ func TestIngestionFailureRetriesThenFails(t *testing.T) {
 		}
 	}
 
-	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	stored, err := a.store.FindDocumentByID(context.Background(), doc.ID)
 	if err != nil {
 		t.Fatalf("load document: %v", err)
 	}
 	if stored.Status != documentStatusFailed || stored.ErrorCode != "document_extraction_failed" {
 		t.Fatalf("expected failed document with extraction error, got %+v", stored)
 	}
-	job, err := a.store.findLatestIngestionJobForDocument(context.Background(), doc.ID)
+	job, err := a.store.FindLatestIngestionJobForDocument(context.Background(), doc.ID)
 	if err != nil {
 		t.Fatalf("load job: %v", err)
 	}
@@ -895,10 +906,10 @@ func TestIngestionFailureRetriesThenFails(t *testing.T) {
 
 func TestIngestionCancellation(t *testing.T) {
 	a := newTestApp(t)
-	cookie := loginAs(t, a, "member", roleMember)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
 	kb := createKnowledgeBaseForTest(t, a, cookie, "Uploads")
 	uploaded := uploadFile(t, a, cookie, kb.ID, "report.pdf", "application/pdf", []byte("content"), false)
-	var doc documentResponse
+	var doc docpkg.Response
 	decodeRecorder(t, uploaded, &doc)
 
 	cancelled := performJSONWithCookie(t, a, http.MethodPost, "/api/documents/"+strconv.FormatInt(doc.ID, 10)+"/ingestion/cancel", `{}`, cookie)
@@ -912,7 +923,7 @@ func TestIngestionCancellation(t *testing.T) {
 	if processed {
 		t.Fatal("expected cancellation processing to skip extraction")
 	}
-	stored, err := a.store.findDocumentByID(context.Background(), doc.ID)
+	stored, err := a.store.FindDocumentByID(context.Background(), doc.ID)
 	if err != nil {
 		t.Fatalf("load document: %v", err)
 	}
@@ -926,17 +937,17 @@ func TestOpenRouterProviderIntegration(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("OPENROUTER_API_KEY is not set")
 	}
-	baseURL := env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-	embeddingModel := env("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
-	chatModel := env("OPENROUTER_CHAT_MODEL", "poolside/laguna-xs.2")
+	baseURL := utils.Env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+	embeddingModel := utils.Env("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
+	chatModel := utils.Env("OPENROUTER_CHAT_MODEL", "poolside/laguna-xs.2")
 	a := newTestApp(t)
 	a.httpClient = &http.Client{Timeout: 2 * time.Minute}
-	embedding, err := a.openAICompatibleEmbedding(context.Background(), providerSetting{
+	embedding, err := providers.OpenAICompatibleEmbedding(context.Background(), a.httpClient, domain.ProviderSetting{
 		Purpose: providerPurposeEmbedding,
 		BaseURL: baseURL,
 		Model:   embeddingModel,
 		APIKey:  apiKey,
-	}, "short provider integration test")
+	}, "short provider integration test", "")
 	if err != nil {
 		t.Fatalf("real embedding request: %v", err)
 	}
@@ -955,7 +966,7 @@ func TestOpenRouterProviderIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal chat payload: %v", err)
 	}
-	endpoint, err := joinProviderPath(baseURL, "chat/completions")
+	endpoint, err := providers.JoinProviderPath(baseURL, "chat/completions")
 	if err != nil {
 		t.Fatalf("chat endpoint: %v", err)
 	}
@@ -996,7 +1007,7 @@ func newTestApp(t *testing.T) *app {
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := testConfig(t)
-	if err := store.ensureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
+	if err := store.EnsureProviderDefaults(context.Background(), cfg.defaultProviders); err != nil {
 		t.Fatalf("seed provider defaults: %v", err)
 	}
 	t.Cleanup(func() {
@@ -1008,10 +1019,10 @@ func newTestApp(t *testing.T) *app {
 		startedAt:        time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
 		config:           cfg,
 		store:            store,
-		chunkingStrategy: markdownChunkingStrategy{},
-		activeChats:      make(map[string]context.CancelFunc),
+		chunkingStrategy: ingestionpkg.MarkdownChunkingStrategy{},
+		activeChats:      chatpkg.NewCancelRegistry(),
 	}
-	vectorIndex, err := newVectorIndex(a.embeddingFunc(), cfg.storageRoot)
+	vectorIndex, err := search.NewVectorIndex(a.embeddingFunc(), cfg.storageRoot)
 	if err != nil {
 		t.Fatalf("create vector index: %v", err)
 	}
@@ -1026,7 +1037,7 @@ func testConfig(t *testing.T) config {
 		ocrURL:        "http://ocr:8082",
 		fakeProviders: true,
 		storageRoot:   filepath.Join(t.TempDir(), "files"),
-		defaultProviders: map[string]providerSetting{
+		defaultProviders: map[string]domain.ProviderSetting{
 			providerPurposeChat: {
 				Purpose: providerPurposeChat,
 				BaseURL: "http://backend:8080/fake-openai",
@@ -1041,7 +1052,7 @@ func testConfig(t *testing.T) config {
 	}
 }
 
-func createUserForTest(t *testing.T, a *app, username, password, role string) user {
+func createUserForTest(t *testing.T, a *app, username, password, role string) domain.User {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/test", nil)
 	created, err := a.createUserWithPassword(req, username, password, role)
@@ -1058,16 +1069,16 @@ func loginAs(t *testing.T, a *app, username, role string) *http.Cookie {
 	if login.Code != http.StatusOK {
 		t.Fatalf("login as %s: %d %s", username, login.Code, login.Body.String())
 	}
-	return findCookie(t, login, sessionCookie)
+	return findCookie(t, login, authpkg.SessionCookie)
 }
 
-func createKnowledgeBaseForTest(t *testing.T, a *app, cookie *http.Cookie, name string) knowledgeBaseResponse {
+func createKnowledgeBaseForTest(t *testing.T, a *app, cookie *http.Cookie, name string) knowledgepkg.Response {
 	t.Helper()
 	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases", `{"name":"`+name+`"}`, cookie)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("create knowledge base: %d %s", res.Code, res.Body.String())
 	}
-	var kb knowledgeBaseResponse
+	var kb knowledgepkg.Response
 	decodeRecorder(t, res, &kb)
 	return kb
 }
@@ -1109,8 +1120,8 @@ func uploadFile(t *testing.T, a *app, cookie *http.Cookie, knowledgeBaseID int64
 
 func insertIndexedDocumentForTest(t *testing.T, a *app, knowledgeBaseID int64, filename, content string) {
 	t.Helper()
-	current := createUserForTest(t, a, "owner-"+filename, "password123", roleMember)
-	doc, err := a.store.createDocument(context.Background(), documentRecord{
+	current := createUserForTest(t, a, "owner-"+filename, "password123", authpkg.RoleMember)
+	doc, err := a.store.CreateDocument(context.Background(), domain.DocumentRecord{
 		KnowledgeBaseID:  knowledgeBaseID,
 		OwnerID:          current.ID,
 		OriginalFilename: filename,
@@ -1124,20 +1135,20 @@ func insertIndexedDocumentForTest(t *testing.T, a *app, knowledgeBaseID int64, f
 	if err != nil {
 		t.Fatalf("create indexed test document: %v", err)
 	}
-	job, err := a.store.createIngestionJob(context.Background(), doc.ID)
+	job, err := a.store.CreateIngestionJob(context.Background(), doc.ID)
 	if err != nil {
 		t.Fatalf("create ingestion job: %v", err)
 	}
-	if err := a.store.completeIngestionJob(context.Background(), job, doc, documentVersion{
+	if err := a.store.CompleteIngestionJob(context.Background(), job, doc, domain.DocumentVersion{
 		DocumentID:         doc.ID,
 		MarkdownStorageKey: filepath.Join("documents", filename, "extracted.md"),
 		SchemaVersion:      "v0.test",
 		MetadataJSON:       "{}",
 		EmbeddingModel:     "fake-embedding",
-	}, []documentChunk{{
+	}, []domain.DocumentChunk{{
 		Content:          content,
 		SourceAnchorJSON: `{"id":"page-1","kind":"page","label":"Page 1"}`,
-		TokenCount:       estimatedTokenCount(content),
+		TokenCount:       ingestionpkg.EstimatedTokenCount(content),
 	}}); err != nil {
 		t.Fatalf("complete ingestion: %v", err)
 	}
@@ -1199,10 +1210,10 @@ func mustSessionIDFromEvents(t *testing.T, events map[string][]string) string {
 	return start.SessionID
 }
 
-func chatMessagesContainCitation(messages []chatMessage, citationID string) bool {
+func chatMessagesContainCitation(messages []domain.ChatMessage, citationID string) bool {
 	for _, msg := range messages {
 		var metadata struct {
-			Citations []retrievalEvidence `json:"citations"`
+			Citations []chatpkg.RetrievalEvidence `json:"citations"`
 		}
 		if json.Unmarshal([]byte(msg.Metadata), &metadata) != nil {
 			continue
@@ -1216,7 +1227,7 @@ func chatMessagesContainCitation(messages []chatMessage, citationID string) bool
 	return false
 }
 
-func chatMessagesContainText(messages []chatMessage, text string) bool {
+func chatMessagesContainText(messages []domain.ChatMessage, text string) bool {
 	for _, msg := range messages {
 		if strings.Contains(msg.Content, text) {
 			return true

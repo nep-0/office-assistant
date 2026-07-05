@@ -1,17 +1,16 @@
-package main
+package app
 
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
-	"strconv"
 	"time"
+
+	"office-assistant/backend/domain"
+	"office-assistant/backend/httpapi"
 )
 
 const debugTraceRetention = 24 * time.Hour
-
-type correlationKey struct{}
 
 type activityResponse struct {
 	Events []activityEventResponse `json:"events"`
@@ -52,35 +51,13 @@ type updateDebugModeRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-func withCorrelation(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" {
-			id, _ = randomToken()
-			if id == "" {
-				id = strconv.FormatInt(time.Now().UnixNano(), 36)
-			}
-		}
-		w.Header().Set("X-Request-ID", id)
-		start := time.Now()
-		ctx := context.WithValue(r.Context(), correlationKey{}, id)
-		next.ServeHTTP(w, r.WithContext(ctx))
-		log.Printf("correlation_id=%s method=%s path=%s duration_ms=%d", id, r.Method, r.URL.Path, time.Since(start).Milliseconds())
-	})
-}
-
-func correlationID(ctx context.Context) string {
-	if id, ok := ctx.Value(correlationKey{}).(string); ok {
-		return id
-	}
-	return ""
-}
+var correlationID = httpapi.CorrelationID
 
 func (a *app) getActivity(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	events, err := a.store.listActivity(r.Context(), 100)
+	events, err := a.store.ListActivity(r.Context(), 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load activity", nil)
 		return
@@ -104,7 +81,7 @@ func (a *app) getMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	metrics, err := a.store.listMetrics(r.Context(), 100)
+	metrics, err := a.store.ListMetrics(r.Context(), 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load metrics", nil)
 		return
@@ -127,7 +104,7 @@ func (a *app) getDebugMode(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	setting, err := a.store.debugSetting(r.Context(), a.config.debugEnvEnabled)
+	setting, err := a.store.DebugSetting(r.Context(), a.config.debugEnvEnabled)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load debug mode", nil)
 		return
@@ -149,12 +126,12 @@ func (a *app) updateDebugMode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", "request body must be valid JSON", nil)
 		return
 	}
-	if err := a.store.setDebugMode(r.Context(), req.Enabled); err != nil {
+	if err := a.store.SetDebugMode(r.Context(), req.Enabled); err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not update debug mode", nil)
 		return
 	}
-	_ = a.store.appendActivity(r.Context(), current.ID, "debug_mode_changed", "debug", "", map[string]any{"enabled": req.Enabled})
-	setting, err := a.store.debugSetting(r.Context(), a.config.debugEnvEnabled)
+	_ = a.store.AppendActivity(r.Context(), current.ID, "debug_mode_changed", "debug", "", map[string]any{"enabled": req.Enabled})
+	setting, err := a.store.DebugSetting(r.Context(), a.config.debugEnvEnabled)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not load debug mode", nil)
 		return
@@ -162,7 +139,7 @@ func (a *app) updateDebugMode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toDebugModeResponse(setting, a.config.debugEnvEnabled))
 }
 
-func toDebugModeResponse(setting debugSetting, envLocked bool) debugModeResponse {
+func toDebugModeResponse(setting domain.DebugSetting, envLocked bool) debugModeResponse {
 	res := debugModeResponse{
 		Enabled:           setting.Enabled,
 		Source:            setting.Source,
@@ -184,6 +161,6 @@ func decodeDetails(raw string) map[string]any {
 }
 
 func (a *app) debugEnabled(ctx context.Context) bool {
-	setting, err := a.store.debugSetting(ctx, a.config.debugEnvEnabled)
+	setting, err := a.store.DebugSetting(ctx, a.config.debugEnvEnabled)
 	return err == nil && setting.Enabled
 }

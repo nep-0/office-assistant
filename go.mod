@@ -1,4 +1,4 @@
-module github.com/jeff/office-assistant
+module office-assistant
 
 go 1.26.0
 
