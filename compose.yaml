@@ -52,39 +52,35 @@ services:
       - /tmp
 
   llm:
-    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}"
+    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9717}"
     profiles:
       - local-models
     command:
       - "-m"
-      - "/models/${LLM_GGUF:-chat.gguf}"
+      - "/models/${LLM_GGUF:-MiniCPM5-1B-Q4_K_M.gguf}"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "8083"
-      - "-c"
-      - "${LLM_CONTEXT_SIZE:-4096}"
-      - "-ngl"
-      - "${LLM_GPU_LAYERS:-0}"
     volumes:
-      - "${MODEL_DIR:-./models}:/models:ro"
+      - "${MODEL_DIR:-/home/jeff/models}:/models:ro"
 
   embedding:
-    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}"
+    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9717}"
     profiles:
       - local-models
     command:
       - "-m"
-      - "/models/${EMBEDDING_GGUF:-embedding.gguf}"
+      - "/models/${EMBEDDING_GGUF:-embeddinggemma-300m-qat-Q8_0.gguf}"
+      - "--embedding"
+      - "--ubatch-size" 
+      - "1024"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "8084"
-      - "--embedding"
-      - "-ngl"
-      - "${EMBEDDING_GPU_LAYERS:-0}"
     volumes:
-      - "${MODEL_DIR:-./models}:/models:ro"
+      - "${MODEL_DIR:-/home/jeff/models}:/models:ro"
 
 volumes:
   backend-data:

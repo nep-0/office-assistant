@@ -37,55 +37,35 @@ podman compose up --build
 For cloud testing, keep the same containers but pass provider settings through environment variables before first boot:
 
 ```sh
-FAKE_PROVIDERS=false \
-CHAT_PROVIDER_BASE_URL="https://openrouter.ai/api/v1" \
-CHAT_MODEL="your-chat-model" \
-CHAT_API_KEY="..." \
-EMBEDDING_PROVIDER_BASE_URL="https://openrouter.ai/api/v1" \
-EMBEDDING_MODEL="your-embedding-model" \
-EMBEDDING_API_KEY="..." \
-podman compose up --build
+OPENROUTER_API_KEY="..." bash scripts/setup-cloud.sh
 ```
 
 If SQLite already contains provider settings, update them in the admin UI or reset the backend volume for a fresh first-boot seed.
+
+`scripts/setup-cloud.sh` defaults to OpenRouter-compatible settings with `poolside/laguna-xs.2` for chat and `qwen/qwen3-embedding-8b` for embeddings. Override `CHAT_PROVIDER_BASE_URL`, `CHAT_MODEL`, `CHAT_API_KEY`, `EMBEDDING_PROVIDER_BASE_URL`, `EMBEDDING_MODEL`, or `EMBEDDING_API_KEY` for another OpenAI-compatible provider. Set `CONTAINER_ENGINE=docker` to use Docker Compose.
 
 ## Local Model Startup
 
 The local model path uses the `local-models` Compose profile. Place GGUF files in a host model directory and point Compose at it:
 
 ```sh
-mkdir -p models
-# Copy your chat GGUF to models/chat.gguf.
-# Copy your embedding GGUF to models/embedding.gguf.
+ls /home/jeff/models/MiniCPM5-1B-Q4_K_M.gguf
+ls /home/jeff/models/embeddinggemma-300m-qat-Q8_0.gguf
 ```
 
 Start the stack with cloud providers disabled and both model endpoints set to the internal llama.cpp servers:
 
 ```sh
-MODEL_DIR="$PWD/models" \
-LLM_GGUF="chat.gguf" \
-EMBEDDING_GGUF="embedding.gguf" \
-FAKE_PROVIDERS=false \
-CHAT_PROVIDER_BASE_URL="http://llm:8083/v1" \
-CHAT_MODEL="local-chat" \
-EMBEDDING_PROVIDER_BASE_URL="http://embedding:8084/v1" \
-EMBEDDING_MODEL="local-embedding" \
-podman compose --profile local-models up --build
+bash scripts/setup-local.sh
 ```
 
-Docker Compose uses the same environment:
+Docker Compose uses the same script with `CONTAINER_ENGINE=docker`:
 
 ```sh
-MODEL_DIR="$PWD/models" \
-FAKE_PROVIDERS=false \
-CHAT_PROVIDER_BASE_URL="http://llm:8083/v1" \
-CHAT_MODEL="local-chat" \
-EMBEDDING_PROVIDER_BASE_URL="http://embedding:8084/v1" \
-EMBEDDING_MODEL="local-embedding" \
-docker compose --profile local-models up --build
+CONTAINER_ENGINE=docker bash scripts/setup-local.sh
 ```
 
-The default local profile targets ordinary CPU deployment. It sets `-ngl 0` for both llama.cpp servers and conservative context defaults. Override `LLM_CONTEXT_SIZE`, `LLM_GPU_LAYERS`, or `EMBEDDING_GPU_LAYERS` only when the deployment machine has enough memory or GPU support.
+The default local profile uses `ghcr.io/ggml-org/llama.cpp:server-b9717`, `/home/jeff/models/MiniCPM5-1B-Q4_K_M.gguf` for chat, `/home/jeff/models/embeddinggemma-300m-qat-Q8_0.gguf` for embeddings, targets ordinary CPU deployment, sets `-ngl 0` for both llama.cpp servers, and uses conservative context defaults. Override `LLAMA_CPP_IMAGE`, `MODEL_DIR`, `LLM_GGUF`, `EMBEDDING_GGUF`, `LLM_CONTEXT_SIZE`, `LLM_GPU_LAYERS`, or `EMBEDDING_GPU_LAYERS` only when the deployment machine has the matching image, model files, memory, or GPU support.
 
 Local models can take a while to load. `/api/ready` reports `degraded` with a provider message while the llama.cpp `/v1/models` endpoint is unreachable, then returns `ready` after both chat and embedding providers respond.
 
