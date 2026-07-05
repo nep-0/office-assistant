@@ -74,6 +74,65 @@ func TestReadyIncludesFakeProviders(t *testing.T) {
 	}
 }
 
+func TestReadyProbesConfiguredProviders(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected provider path %q", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": []any{}})
+	}))
+	t.Cleanup(provider.Close)
+
+	a := newTestApp(t)
+	a.config.fakeProviders = false
+	if _, err := a.store.UpdateProviderSetting(context.Background(), domain.ProviderSetting{
+		Purpose: providerPurposeChat,
+		BaseURL: provider.URL + "/v1",
+		Model:   "local-chat",
+	}); err != nil {
+		t.Fatalf("update chat provider: %v", err)
+	}
+	if _, err := a.store.UpdateProviderSetting(context.Background(), domain.ProviderSetting{
+		Purpose: providerPurposeEmbedding,
+		BaseURL: provider.URL + "/v1",
+		Model:   "local-embedding",
+	}); err != nil {
+		t.Fatalf("update embedding provider: %v", err)
+	}
+
+	res := performJSON(t, a, http.MethodGet, "/api/ready", "")
+	var body readinessResponse
+	decodeRecorder(t, res, &body)
+	if body.Status != "ready" {
+		t.Fatalf("expected ready status, got %+v", body)
+	}
+	if body.Dependencies["chat_model"].Mode != "openai-compatible" {
+		t.Fatalf("expected openai-compatible mode, got %+v", body.Dependencies["chat_model"])
+	}
+}
+
+func TestReadyDegradesWhenProviderUnavailable(t *testing.T) {
+	a := newTestApp(t)
+	a.config.fakeProviders = false
+	if _, err := a.store.UpdateProviderSetting(context.Background(), domain.ProviderSetting{
+		Purpose: providerPurposeChat,
+		BaseURL: "http://127.0.0.1:1/v1",
+		Model:   "local-chat",
+	}); err != nil {
+		t.Fatalf("update chat provider: %v", err)
+	}
+
+	res := performJSON(t, a, http.MethodGet, "/api/ready", "")
+	var body readinessResponse
+	decodeRecorder(t, res, &body)
+	if body.Status != "degraded" {
+		t.Fatalf("expected degraded status, got %+v", body)
+	}
+	if body.Dependencies["chat_model"].Message == "" {
+		t.Fatalf("expected actionable provider message, got %+v", body.Dependencies["chat_model"])
+	}
+}
+
 func TestFirstRunSetupCreatesAdminAndSession(t *testing.T) {
 	a := newTestApp(t)
 

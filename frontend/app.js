@@ -30,7 +30,8 @@ async function loadStatus() {
       ...Object.entries(readyBody.dependencies).map(([name, status]) => {
         const item = document.createElement("li");
         const detail = status.mode || status.url || "";
-        item.textContent = `${name}: ${status.status}${detail ? ` (${detail})` : ""}`;
+        const message = status.message ? ` - ${status.message}` : "";
+        item.textContent = `${name}: ${status.status}${detail ? ` (${detail})` : ""}${message}`;
         return item;
       }),
     );

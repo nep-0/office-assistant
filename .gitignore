@@ -1,3 +1,5 @@
 docs/conversations
 __pycache__/
 *.py[cod]
+artifacts/
+models/

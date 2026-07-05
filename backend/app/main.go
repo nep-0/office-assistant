@@ -50,9 +50,10 @@ type readinessResponse struct {
 }
 
 type dependencyStatus struct {
-	Status string `json:"status"`
-	URL    string `json:"url,omitempty"`
-	Mode   string `json:"mode,omitempty"`
+	Status  string `json:"status"`
+	URL     string `json:"url,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 func Run() {
@@ -192,9 +193,13 @@ func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 func (a *app) ready(w http.ResponseWriter, _ *http.Request) {
 	chat := a.providerDependencyStatus(providerPurposeChat)
 	embedding := a.providerDependencyStatus(providerPurposeEmbedding)
+	status := "ready"
+	if chat.Status != "ready" || embedding.Status != "ready" {
+		status = "degraded"
+	}
 
 	writeJSON(w, http.StatusOK, readinessResponse{
-		Status: "ready",
+		Status: status,
 		Dependencies: map[string]dependencyStatus{
 			"document": {
 				Status: "configured",
@@ -205,14 +210,16 @@ func (a *app) ready(w http.ResponseWriter, _ *http.Request) {
 				URL:    a.config.ocrURL,
 			},
 			"chat_model": {
-				Status: chat.Status,
-				URL:    chat.URL,
-				Mode:   chat.Mode,
+				Status:  chat.Status,
+				URL:     chat.URL,
+				Mode:    chat.Mode,
+				Message: chat.Message,
 			},
 			"embedding_model": {
-				Status: embedding.Status,
-				URL:    embedding.URL,
-				Mode:   embedding.Mode,
+				Status:  embedding.Status,
+				URL:     embedding.URL,
+				Mode:    embedding.Mode,
+				Message: embedding.Message,
 			},
 		},
 	})

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -104,19 +105,57 @@ func (a *app) updateProviderSetting(w http.ResponseWriter, r *http.Request) {
 func (a *app) providerDependencyStatus(purpose string) dependencyStatus {
 	setting, err := a.store.FindProviderSetting(context.Background(), purpose)
 	if err != nil {
-		return dependencyStatus{Status: "degraded", Mode: "missing"}
+		return dependencyStatus{Status: "degraded", Mode: "missing", Message: "Provider setting is missing."}
 	}
 	if strings.TrimSpace(setting.BaseURL) == "" || strings.TrimSpace(setting.Model) == "" {
-		return dependencyStatus{Status: "degraded", Mode: "unconfigured"}
+		return dependencyStatus{Status: "degraded", Mode: "unconfigured", Message: "Configure a provider base URL and model."}
 	}
 	mode := "openai-compatible"
 	if a.config.fakeProviders && strings.Contains(setting.BaseURL, "/fake-openai") {
 		mode = "fake"
+		return dependencyStatus{
+			Status:  "ready",
+			URL:     setting.BaseURL,
+			Mode:    mode,
+			Message: "Using deterministic fake provider.",
+		}
+	}
+	status := a.probeProvider(setting)
+	status.Mode = mode
+	return status
+}
+
+func (a *app) probeProvider(setting domain.ProviderSetting) dependencyStatus {
+	endpoint, err := providerpkg.JoinProviderPath(setting.BaseURL, "models")
+	if err != nil {
+		return dependencyStatus{Status: "degraded", URL: setting.BaseURL, Message: "Provider base URL is invalid."}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return dependencyStatus{Status: "degraded", URL: setting.BaseURL, Message: "Provider readiness request could not be created."}
+	}
+	if setting.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+setting.APIKey)
+	}
+	client := a.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return dependencyStatus{Status: "degraded", URL: setting.BaseURL, Message: "Provider is not reachable yet; local models may still be loading."}
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 1024))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return dependencyStatus{Status: "degraded", URL: setting.BaseURL, Message: "Provider readiness endpoint returned " + res.Status + "."}
 	}
 	return dependencyStatus{
-		Status: "ready",
-		URL:    setting.BaseURL,
-		Mode:   mode,
+		Status:  "ready",
+		URL:     setting.BaseURL,
+		Message: "Provider is reachable.",
 	}
 }
 
