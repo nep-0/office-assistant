@@ -97,7 +97,7 @@ The OCR service uses PaddleOCR's PP-OCR pipeline on CPU by default:
 podman compose up
 ```
 
-PaddleOCR, PaddleX, and ModelScope files are cached in named volumes mounted at `/root/.cache`, `/root/.paddlex`, and `/root/.modelscope`. The first OCR request may take longer while models are prepared.
+PaddleOCR, PaddleX, and ModelScope files are cached in named volumes mounted at `/root/.cache`, `/root/.paddlex`, and `/root/.modelscope`. The OCR container disables SELinux process labeling because rootless Podman named volumes can otherwise receive a different MCS label than the recreated OCR container. The first OCR request may take longer while models are prepared.
 
 ## Model Provider Defaults
 

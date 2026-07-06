@@ -52,6 +52,8 @@ services:
       PADDLE_PDX_CACHE_HOME: "/root/.paddlex"
       MODELSCOPE_CACHE: "/root/.modelscope"
     read_only: true
+    security_opt:
+      - label=disable
     volumes:
       - ocr-cache:/root/.cache:Z
       - ocr-paddlex-data:/root/.paddlex:Z

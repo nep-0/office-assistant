@@ -82,7 +82,7 @@ def call_ocr(data, filename, ocr_url, ocr_func):
     request = urllib.request.Request(
         ocr_url.rstrip("/") + "/ocr",
         data=data,
-        headers={"Content-Type": "application/octet-stream", "X-Filename": filename},
+        headers={"Content-Type": "application/octet-stream", "X-Filename": ocr_header_filename(filename)},
         method="POST",
     )
     try:
@@ -97,6 +97,16 @@ def call_ocr(data, filename, ocr_url, ocr_func):
     if not text.strip():
         raise ExtractionError("ocr_empty", "OCR produced no text")
     return text
+
+
+def ocr_header_filename(filename):
+    fallback = "upload" + (posixpath.splitext(filename.lower())[1] or ".png")
+    cleaned = posixpath.basename((filename or fallback).strip()) or fallback
+    try:
+        cleaned.encode("latin-1")
+    except UnicodeEncodeError:
+        return fallback
+    return cleaned
 
 
 def ocr_error_message(body, fallback):

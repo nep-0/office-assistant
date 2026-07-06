@@ -5,7 +5,7 @@ from io import BytesIO
 from openpyxl import Workbook
 from pptx import Presentation
 
-from extractor import ExtractionError, extract_upload, ocr_error_message
+from extractor import ExtractionError, extract_upload, ocr_error_message, ocr_header_filename
 
 
 class ExtractorTests(unittest.TestCase):
@@ -64,6 +64,20 @@ class ExtractorTests(unittest.TestCase):
         self.assertIn("OCR text from scan.png", package["markdown"])
         self.assertTrue(package["ocr"]["used"])
         self.assertEqual(package["source_anchors"][0]["kind"], "image")
+
+    def test_image_preserves_chinese_filename_in_metadata(self):
+        package = extract_upload(
+            "扫描.png",
+            b"fake-image",
+            ocr_func=lambda _data, filename: f"OCR text from {filename}",
+        )
+
+        self.assertEqual(package["metadata"]["filename"], "扫描.png")
+        self.assertEqual(package["source_anchors"][0]["label"], "扫描.png")
+
+    def test_ocr_header_filename_falls_back_for_chinese_names(self):
+        self.assertEqual(ocr_header_filename("扫描.png"), "upload.png")
+        self.assertEqual(ocr_header_filename("scan.png"), "scan.png")
 
     def test_unsupported_file_fails_clearly(self):
         with self.assertRaises(ExtractionError) as caught:
