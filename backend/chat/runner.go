@@ -27,6 +27,8 @@ type Runner struct {
 	MaxRetrievalLimit int
 }
 
+const knowledgeBaseAgentName = "knowledge_base_assistant"
+
 type RunRequest struct {
 	Current   domain.User
 	KB        domain.KnowledgeBase
@@ -35,7 +37,7 @@ type RunRequest struct {
 }
 
 type RunDeps struct {
-	LoadPrompt       func(context.Context, string, string) (string, error)
+	LoadHistory      func(context.Context, string) ([]domain.ChatMessage, error)
 	Retrieve         func(context.Context, domain.KnowledgeBase, RetrievalToolArgs) (RetrievalToolResult, error)
 	Model            func(context.Context) (model.LLM, error)
 	RecordPrompt     func(context.Context, domain.KnowledgeBase, string, string)
@@ -78,7 +80,7 @@ func (r Runner) Run(ctx context.Context, req RunRequest, deps RunDeps, emit Emit
 		return RunResult{}, err
 	}
 	adkAgent, err := llmagent.New(llmagent.Config{
-		Name:        "knowledge_base_assistant",
+		Name:        knowledgeBaseAgentName,
 		Model:       modelInstance,
 		Description: "Answers questions from a selected Knowledge Base.",
 		Instruction: KnowledgeBaseInstruction(req.KB),
@@ -98,15 +100,19 @@ func (r Runner) Run(ctx context.Context, req RunRequest, deps RunDeps, emit Emit
 		return RunResult{}, err
 	}
 
-	prompt, err := deps.LoadPrompt(ctx, req.SessionID, req.Message)
+	history, err := deps.LoadHistory(ctx, req.SessionID)
 	if err != nil {
 		return RunResult{}, err
 	}
+	userID := strconv.FormatInt(req.Current.ID, 10)
+	if err := SeedADKSession(ctx, sessionService, r.AppName, userID, req.SessionID, knowledgeBaseAgentName, history); err != nil {
+		return RunResult{}, err
+	}
 	if deps.RecordPrompt != nil {
-		deps.RecordPrompt(ctx, req.KB, req.SessionID, prompt)
+		deps.RecordPrompt(ctx, req.KB, req.SessionID, RenderStructuredHistoryForDebug(history, req.Message))
 	}
 
-	userMessage := genai.NewContentFromText(prompt, genai.RoleUser)
+	userMessage := genai.NewContentFromText(req.Message, genai.RoleUser)
 	var answer strings.Builder
 	sawPartial := false
 	correlationID := ""
@@ -114,7 +120,7 @@ func (r Runner) Run(ctx context.Context, req RunRequest, deps RunDeps, emit Emit
 		correlationID = deps.CorrelationID(ctx)
 	}
 	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_started", correlationID, req.SessionID)
-	for event, err := range runnr.Run(ctx, strconv.FormatInt(req.Current.ID, 10), req.SessionID, userMessage, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+	for event, err := range runnr.Run(ctx, userID, req.SessionID, userMessage, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
 			log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_error error=%q", correlationID, req.SessionID, err.Error())
 			return RunResult{Evidence: evidence, RetrievalCalled: retrievalCalled}, err

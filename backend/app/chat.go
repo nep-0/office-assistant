@@ -74,13 +74,18 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	emitter := httpapi.NewSSEEmitter(w)
 	emit := emitter.Emit
 
+	history, err := a.store.ListAllChatMessages(ctx, sessionRecord.ID)
+	if err != nil {
+		emit("error", httpapi.APIError{Code: "store_error", Message: "could not load chat history"})
+		return
+	}
 	if err := a.store.AppendChatMessage(ctx, domain.ChatMessage{SessionID: sessionRecord.ID, Role: "user", Content: req.Message, Metadata: "{}"}); err != nil {
 		emit("error", httpapi.APIError{Code: "store_error", Message: "could not save chat message"})
 		return
 	}
 	emit("start", map[string]any{"session_id": sessionRecord.ID})
 
-	answer, evidence, retrievalCalled, err := a.runKnowledgeBaseAgent(ctx, current, kb, sessionRecord.ID, req.Message, emit)
+	answer, evidence, retrievalCalled, err := a.runKnowledgeBaseAgent(ctx, current, kb, sessionRecord.ID, req.Message, history, emit)
 	if err != nil {
 		code := "chat_error"
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -169,7 +174,7 @@ func (a *app) resolveChatSession(ctx context.Context, current domain.User, kb do
 	return chatpkg.ResolveSession(ctx, a.store, current, kb, req.SessionID, req.Message, randomToken)
 }
 
-func (a *app) runKnowledgeBaseAgent(ctx context.Context, current domain.User, kb domain.KnowledgeBase, sessionID, message string, emit func(string, any)) (string, []chatpkg.RetrievalEvidence, bool, error) {
+func (a *app) runKnowledgeBaseAgent(ctx context.Context, current domain.User, kb domain.KnowledgeBase, sessionID, message string, history []domain.ChatMessage, emit func(string, any)) (string, []chatpkg.RetrievalEvidence, bool, error) {
 	runner := chatpkg.Runner{
 		AppName:           chatAppName,
 		RetrievalToolName: retrievalToolName,
@@ -181,8 +186,10 @@ func (a *app) runKnowledgeBaseAgent(ctx context.Context, current domain.User, kb
 		SessionID: sessionID,
 		Message:   message,
 	}, chatpkg.RunDeps{
-		LoadPrompt: a.promptWithHistory,
-		Retrieve:   a.retrieveKnowledge,
+		LoadHistory: func(context.Context, string) ([]domain.ChatMessage, error) {
+			return history, nil
+		},
+		Retrieve: a.retrieveKnowledge,
 		Model: func(ctx context.Context) (model.LLM, error) {
 			setting, err := a.store.FindProviderSetting(ctx, providerPurposeChat)
 			if err != nil {

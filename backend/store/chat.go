@@ -72,3 +72,25 @@ ORDER BY id ASC
 	}
 	return messages, rows.Err()
 }
+
+func (s *Store) ListAllChatMessages(ctx context.Context, sessionID string) ([]ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, role, content, metadata_json, created_at
+FROM chat_messages
+WHERE session_id = ?
+ORDER BY id ASC
+`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []ChatMessage
+	for rows.Next() {
+		msg, err := scanChatMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
