@@ -1,122 +1,12 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Office Assistant</title>
-    <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <main class="shell">
-      <aside class="sidebar">
-        <div class="brand">Office Assistant</div>
-        <nav aria-label="Primary">
-          <a href="/" aria-current="page">Status</a>
-          <a href="/">Knowledge Bases</a>
-          <a href="/">Documents</a>
-          <a href="/">Chat</a>
-        </nav>
-      </aside>
-      <section class="workspace" aria-labelledby="page-title">
-        <header>
-          <p class="eyebrow">Local workspace</p>
-          <h1 id="page-title">Office Assistant</h1>
-        </header>
-        <div class="status-grid" id="auth-grid">
-          <section class="panel">
-            <h2 id="auth-title">Account</h2>
-            <p id="auth-summary">Checking setup status...</p>
-            <form id="auth-form" class="form" hidden>
-              <label>
-                Username
-                <input id="username" name="username" autocomplete="username" required>
-              </label>
-              <label>
-                Password
-                <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" required>
-              </label>
-              <button type="submit" id="auth-submit">Continue</button>
-            </form>
-            <button type="button" id="logout-button" hidden>Log out</button>
-            <p id="auth-message" class="message" role="status"></p>
-          </section>
-          <section class="panel">
-            <h2>Dependencies</h2>
-            <ul id="dependency-list">
-              <li>Checking readiness...</li>
-            </ul>
-          </section>
-          <section class="panel">
-            <h2>Admin route</h2>
-            <p id="admin-status">Log in as an admin to verify protected access.</p>
-          </section>
-          <section class="panel wide" id="knowledge-base-panel" hidden>
-            <h2>Knowledge Bases</h2>
-            <p id="knowledge-base-summary">Create or select a Knowledge Base.</p>
-            <form id="knowledge-base-create-form" class="form inline-form">
-              <label>
-                Name
-                <input name="name" placeholder="Finance reports" required>
-              </label>
-              <button type="submit">Create private Knowledge Base</button>
-            </form>
-            <p id="knowledge-base-message" class="message" role="status"></p>
-            <div id="knowledge-base-list" class="knowledge-base-list"></div>
-            <section id="document-panel" class="document-panel" hidden>
-              <h3>Documents</h3>
-              <form id="document-upload-form" class="form inline-form">
-                <label>
-                  File
-                  <input name="file" type="file" required>
-                </label>
-                <button type="submit">Upload</button>
-              </form>
-              <form id="document-search-form" class="form inline-form document-search-form">
-                <label>
-                  Search
-                  <input name="q" placeholder="Filename or extracted text">
-                </label>
-                <button type="submit">Search</button>
-              </form>
-              <p id="document-message" class="message" role="status"></p>
-              <div id="document-list" class="document-list"></div>
-              <pre id="markdown-preview" class="markdown-preview" hidden></pre>
-            </section>
-            <section id="chat-panel" class="chat-panel" hidden>
-              <h3>Chat</h3>
-              <div class="chat-session-bar">
-                <button type="button" id="chat-new-button">New chat</button>
-                <div id="chat-session-list" class="chat-session-list"></div>
-              </div>
-              <div id="chat-log" class="chat-log"></div>
-              <form id="chat-form" class="form chat-form">
-                <label>
-                  Message
-                  <textarea name="message" rows="3" placeholder="Ask about this Knowledge Base" required></textarea>
-                </label>
-                <div class="knowledge-base-actions">
-                  <button type="submit">Send</button>
-                  <button type="button" id="chat-stop-button" hidden>Stop</button>
-                </div>
-              </form>
-              <p id="chat-message" class="message" role="status"></p>
-              <section id="citation-preview" class="citation-preview" hidden></section>
-            </section>
-          </section>
-          <section class="panel wide" id="provider-panel" hidden>
-            <h2>Model providers</h2>
-            <p id="provider-summary">Configure OpenAI-compatible chat and embedding endpoints.</p>
-            <div id="provider-forms" class="provider-forms"></div>
-          </section>
-          <section class="panel wide" id="observability-panel" hidden>
-            <h2>Observability</h2>
-            <div id="debug-summary" class="debug-summary"></div>
-            <div id="metrics-list" class="observability-list"></div>
-            <div id="activity-list" class="observability-list"></div>
-          </section>
-        </div>
-      </section>
-    </main>
-    <script src="/app.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
