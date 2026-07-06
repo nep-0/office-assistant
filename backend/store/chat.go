@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 )
 
@@ -25,6 +26,52 @@ SELECT id, user_id, knowledge_base_id, title, created_at, updated_at
 FROM chat_sessions
 WHERE id = ?
 `, id))
+}
+
+func (s *Store) ListChatSessionsForKnowledgeBase(ctx context.Context, userID, knowledgeBaseID int64) ([]ChatSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, user_id, knowledge_base_id, title, created_at, updated_at
+FROM chat_sessions
+WHERE user_id = ?
+AND knowledge_base_id = ?
+ORDER BY updated_at DESC, created_at DESC
+`, userID, knowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []ChatSession
+	for rows.Next() {
+		session, err := scanChatSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) DeleteChatSession(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM chat_sessions WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
 }
 
 func (s *Store) AppendChatMessage(ctx context.Context, msg ChatMessage) error {

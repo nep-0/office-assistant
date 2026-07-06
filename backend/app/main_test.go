@@ -813,6 +813,65 @@ func TestKnowledgeBaseChatStreamsGroundedAnswer(t *testing.T) {
 	}
 }
 
+func TestChatSessionAPIsListDetailAndDeleteOwnedSessions(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Policies")
+	insertIndexedDocumentForTest(t, a, kb.ID, "policy.pdf", "Remote work requires manager approval.")
+
+	res := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"What is the remote work policy?"}`, cookie)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected chat status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
+	}
+	events := parseSSEEvents(t, res.Body.String())
+	sessionID := mustSessionIDFromEvents(t, events)
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat-sessions", "", cookie)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d: %s", http.StatusOK, list.Code, list.Body.String())
+	}
+	var listBody chatSessionListResponse
+	decodeRecorder(t, list, &listBody)
+	if len(listBody.Sessions) != 1 || listBody.Sessions[0].ID != sessionID {
+		t.Fatalf("unexpected session list: %+v", listBody)
+	}
+
+	detail := performJSONWithCookie(t, a, http.MethodGet, "/api/chat-sessions/"+sessionID, "", cookie)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("expected detail status %d, got %d: %s", http.StatusOK, detail.Code, detail.Body.String())
+	}
+	var detailBody chatSessionDetailResponse
+	decodeRecorder(t, detail, &detailBody)
+	if detailBody.Session.ID != sessionID || len(detailBody.Messages) != 2 {
+		t.Fatalf("unexpected session detail: %+v", detailBody)
+	}
+	if detailBody.Messages[0].Role != "user" || detailBody.Messages[1].Role != "assistant" {
+		t.Fatalf("expected user and assistant messages, got %+v", detailBody.Messages)
+	}
+	if len(detailBody.Messages[1].Citations) == 0 {
+		t.Fatalf("expected assistant citation metadata, got %+v", detailBody.Messages[1])
+	}
+
+	otherCookie := loginAs(t, a, "other", authpkg.RoleMember)
+	otherDetail := performJSONWithCookie(t, a, http.MethodGet, "/api/chat-sessions/"+sessionID, "", otherCookie)
+	if otherDetail.Code != http.StatusNotFound {
+		t.Fatalf("expected other user detail status %d, got %d: %s", http.StatusNotFound, otherDetail.Code, otherDetail.Body.String())
+	}
+	otherDelete := performJSONWithCookie(t, a, http.MethodDelete, "/api/chat-sessions/"+sessionID, "", otherCookie)
+	if otherDelete.Code != http.StatusNotFound {
+		t.Fatalf("expected other user delete status %d, got %d: %s", http.StatusNotFound, otherDelete.Code, otherDelete.Body.String())
+	}
+
+	deleted := performJSONWithCookie(t, a, http.MethodDelete, "/api/chat-sessions/"+sessionID, "", cookie)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d: %s", http.StatusOK, deleted.Code, deleted.Body.String())
+	}
+	missing := performJSONWithCookie(t, a, http.MethodGet, "/api/chat-sessions/"+sessionID, "", cookie)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("expected deleted session to be missing, got %d: %s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
 	a := newTestApp(t)
 	cookie := loginAs(t, a, "member", authpkg.RoleMember)

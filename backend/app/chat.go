@@ -34,6 +34,31 @@ type chatRequest struct {
 	Message   string `json:"message"`
 }
 
+type chatSessionListResponse struct {
+	Sessions []chatSessionResponse `json:"sessions"`
+}
+
+type chatSessionDetailResponse struct {
+	Session  chatSessionResponse   `json:"session"`
+	Messages []chatMessageResponse `json:"messages"`
+}
+
+type chatSessionResponse struct {
+	ID              string `json:"id"`
+	KnowledgeBaseID int64  `json:"knowledge_base_id"`
+	Title           string `json:"title"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+type chatMessageResponse struct {
+	ID        int64                       `json:"id"`
+	Role      string                      `json:"role"`
+	Content   string                      `json:"content"`
+	Citations []chatpkg.RetrievalEvidence `json:"citations,omitempty"`
+	CreatedAt string                      `json:"created_at"`
+}
+
 type citationPreviewResponse struct {
 	SessionID           string         `json:"session_id"`
 	CitationID          string         `json:"citation_id"`
@@ -43,6 +68,78 @@ type citationPreviewResponse struct {
 	SourceAnchor        map[string]any `json:"source_anchor,omitempty"`
 	Text                string         `json:"text"`
 	OriginalDownloadURL string         `json:"original_download_url"`
+}
+
+func (a *app) listChatSessions(w http.ResponseWriter, r *http.Request) {
+	current, kb, ok := a.authorizedKnowledgeBase(w, r)
+	if !ok {
+		return
+	}
+	sessions, err := a.store.ListChatSessionsForKnowledgeBase(r.Context(), current.ID, kb.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load chat sessions", nil)
+		return
+	}
+	res := chatSessionListResponse{Sessions: make([]chatSessionResponse, 0, len(sessions))}
+	for _, session := range sessions {
+		res.Sessions = append(res.Sessions, toChatSessionResponse(session))
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *app) getChatSession(w http.ResponseWriter, r *http.Request) {
+	current, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	sessionID := r.PathValue("id")
+	sessionRecord, err := chatpkg.FindOwnedSession(r.Context(), a.store, current, sessionID)
+	if err != nil {
+		if utils.NotFound(err) {
+			writeError(w, http.StatusNotFound, "chat_session_not_found", "chat session not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load chat session", nil)
+		return
+	}
+	messages, err := a.store.ListAllChatMessages(r.Context(), sessionRecord.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load chat messages", nil)
+		return
+	}
+	res := chatSessionDetailResponse{
+		Session:  toChatSessionResponse(sessionRecord),
+		Messages: make([]chatMessageResponse, 0, len(messages)),
+	}
+	for _, msg := range messages {
+		res.Messages = append(res.Messages, toChatMessageResponse(msg))
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *app) deleteChatSession(w http.ResponseWriter, r *http.Request) {
+	current, ok := a.currentUser(w, r)
+	if !ok {
+		return
+	}
+	sessionID := r.PathValue("id")
+	if _, err := chatpkg.FindOwnedSession(r.Context(), a.store, current, sessionID); err != nil {
+		if utils.NotFound(err) {
+			writeError(w, http.StatusNotFound, "chat_session_not_found", "chat session not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store_error", "could not load chat session", nil)
+		return
+	}
+	if err := a.store.DeleteChatSession(r.Context(), sessionID); err != nil {
+		if utils.NotFound(err) {
+			writeError(w, http.StatusNotFound, "chat_session_not_found", "chat session not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store_error", "could not delete chat session", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +361,34 @@ func knowledgeBaseInstruction(kb domain.KnowledgeBase) string {
 
 func unsupportedAnswerMessage() string {
 	return chatpkg.UnsupportedAnswerMessage()
+}
+
+func toChatSessionResponse(session domain.ChatSession) chatSessionResponse {
+	return chatSessionResponse{
+		ID:              session.ID,
+		KnowledgeBaseID: session.KnowledgeBaseID,
+		Title:           session.Title,
+		CreatedAt:       session.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       session.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func toChatMessageResponse(msg domain.ChatMessage) chatMessageResponse {
+	res := chatMessageResponse{
+		ID:        msg.ID,
+		Role:      msg.Role,
+		Content:   msg.Content,
+		CreatedAt: msg.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if msg.Role == "assistant" {
+		var metadata struct {
+			Citations []chatpkg.RetrievalEvidence `json:"citations"`
+		}
+		if err := json.Unmarshal([]byte(msg.Metadata), &metadata); err == nil {
+			res.Citations = metadata.Citations
+		}
+	}
+	return res
 }
 
 func (a *app) findPersistedCitation(ctx context.Context, sessionID, citationID string) (chatpkg.RetrievalEvidence, bool, error) {

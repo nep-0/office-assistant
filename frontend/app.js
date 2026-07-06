@@ -3,6 +3,7 @@ const state = {
   user: null,
   selectedKnowledgeBaseId: null,
   chatSessionId: null,
+  chatSessions: [],
   chatAbortController: null,
 };
 
@@ -177,6 +178,7 @@ async function loadKnowledgeBases() {
     const selected = body.knowledge_bases.find((kb) => kb.id === state.selectedKnowledgeBaseId);
     if (!selected) {
       state.selectedKnowledgeBaseId = body.knowledge_bases[0]?.id || null;
+      state.chatSessionId = null;
     }
     summary.textContent = state.selectedKnowledgeBaseId
       ? `Selected Knowledge Base #${state.selectedKnowledgeBaseId}.`
@@ -197,6 +199,10 @@ async function loadDocuments() {
     panel.hidden = true;
     chatPanel.hidden = true;
     list.replaceChildren();
+    state.chatSessionId = null;
+    state.chatSessions = [];
+    document.querySelector("#chat-session-list").replaceChildren();
+    document.querySelector("#chat-log").replaceChildren();
     return;
   }
   panel.hidden = false;
@@ -208,11 +214,116 @@ async function loadDocuments() {
       : `/api/knowledge-bases/${state.selectedKnowledgeBaseId}/documents`;
     const body = await api(path);
     renderDocuments(body.documents);
+    await loadChatSessions();
   } catch (error) {
     const item = document.createElement("p");
     item.textContent = "Documents are unavailable.";
     list.replaceChildren(item);
   }
+}
+
+async function loadChatSessions() {
+  const list = document.querySelector("#chat-session-list");
+  if (!state.selectedKnowledgeBaseId) {
+    state.chatSessions = [];
+    list.replaceChildren();
+    return;
+  }
+  try {
+    const body = await api(`/api/knowledge-bases/${state.selectedKnowledgeBaseId}/chat-sessions`);
+    state.chatSessions = body.sessions || [];
+    renderChatSessions();
+  } catch (error) {
+    const item = document.createElement("p");
+    item.textContent = "Sessions unavailable.";
+    list.replaceChildren(item);
+  }
+}
+
+function renderChatSessions() {
+  const list = document.querySelector("#chat-session-list");
+  if (state.chatSessions.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No saved chats.";
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(
+    ...state.chatSessions.slice(0, 6).map((session) => {
+      const item = document.createElement("section");
+      item.className = "chat-session-item";
+      if (session.id === state.chatSessionId) {
+        item.classList.add("selected");
+      }
+      item.innerHTML = `
+        <div>
+          <strong>${escapeText(session.title || "Untitled chat")}</strong>
+          <p>${formatDateTime(session.updated_at)}</p>
+        </div>
+        <div class="knowledge-base-actions">
+          <button type="button" data-action="load">Load</button>
+          <button type="button" data-action="delete">Delete</button>
+        </div>
+      `;
+      item.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => handleChatSessionAction(button.dataset.action, session));
+      });
+      return item;
+    }),
+  );
+}
+
+async function handleChatSessionAction(action, session) {
+  const status = document.querySelector("#chat-message");
+  try {
+    if (action === "load") {
+      await loadChatSessionDetail(session.id);
+    }
+    if (action === "delete") {
+      if (!window.confirm(`Delete chat "${session.title || "Untitled chat"}"?`)) return;
+      await api(`/api/chat-sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      if (state.chatSessionId === session.id) {
+        startNewChat();
+      }
+      await loadChatSessions();
+    }
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+async function loadChatSessionDetail(sessionId) {
+  const body = await api(`/api/chat-sessions/${encodeURIComponent(sessionId)}`);
+  state.chatSessionId = body.session.id;
+  renderChatLog(body.messages || []);
+  renderChatSessions();
+  document.querySelector("#citation-preview").hidden = true;
+  document.querySelector("#chat-message").textContent = "";
+}
+
+function renderChatLog(messages) {
+  const log = document.querySelector("#chat-log");
+  log.replaceChildren(
+    ...messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => {
+        const item = document.createElement("div");
+        item.className = `chat-entry ${message.role}`;
+        item.textContent = message.content;
+        if (message.role === "assistant") {
+          renderCitations(item, message.citations || []);
+        }
+        return item;
+      }),
+  );
+}
+
+function startNewChat() {
+  state.chatSessionId = null;
+  document.querySelector("#chat-log").replaceChildren();
+  document.querySelector("#citation-preview").hidden = true;
+  document.querySelector("#chat-message").textContent = "";
+  renderChatSessions();
 }
 
 function renderDocuments(documents) {
@@ -323,6 +434,10 @@ async function handleKnowledgeBaseAction(action, kb) {
   const message = document.querySelector("#knowledge-base-message");
   try {
     if (action === "select") {
+      if (state.selectedKnowledgeBaseId !== kb.id) {
+        state.chatSessionId = null;
+        document.querySelector("#chat-log").replaceChildren();
+      }
       state.selectedKnowledgeBaseId = kb.id;
       await loadKnowledgeBases();
       return;
@@ -467,6 +582,8 @@ document.querySelector("#logout-button").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST", body: "{}" });
   state.user = null;
   state.selectedKnowledgeBaseId = null;
+  state.chatSessionId = null;
+  state.chatSessions = [];
   await loadAuth();
 });
 
@@ -511,6 +628,10 @@ document.querySelector("#chat-stop-button").addEventListener("click", async () =
     await api(`/api/chat-sessions/${state.chatSessionId}/cancel`, { method: "POST", body: "{}" }).catch(() => ({}));
   }
   document.querySelector("#chat-stop-button").hidden = true;
+});
+
+document.querySelector("#chat-new-button").addEventListener("click", () => {
+  startNewChat();
 });
 
 async function uploadSelectedDocument(confirmDuplicate) {
@@ -574,6 +695,7 @@ async function sendChatMessage(form) {
       return;
     }
     await readChatStream(response.body, assistantItem, status);
+    await loadChatSessions();
   } catch (error) {
     if (error.name !== "AbortError") {
       status.textContent = error.message;
@@ -668,6 +790,12 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
 }
 
 loadStatus();

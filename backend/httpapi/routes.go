@@ -30,6 +30,9 @@ type Handlers struct {
 	CancelDocumentIngestion http.HandlerFunc
 	GetExtractedMarkdown    http.HandlerFunc
 	DownloadDocument        http.HandlerFunc
+	ListChatSessions        http.HandlerFunc
+	GetChatSession          http.HandlerFunc
+	DeleteChatSession       http.HandlerFunc
 	ChatKnowledgeBase       http.HandlerFunc
 	CancelChatSession       http.HandlerFunc
 	GetCitationPreview      http.HandlerFunc
@@ -63,6 +66,9 @@ func RegisterRoutes(mux *http.ServeMux, h Handlers) {
 	mux.HandleFunc("POST /api/documents/{id}/ingestion/cancel", h.CancelDocumentIngestion)
 	mux.HandleFunc("GET /api/documents/{id}/extracted-markdown", h.GetExtractedMarkdown)
 	mux.HandleFunc("GET /api/documents/{id}/download", h.DownloadDocument)
+	mux.HandleFunc("GET /api/knowledge-bases/{id}/chat-sessions", h.ListChatSessions)
+	mux.HandleFunc("GET /api/chat-sessions/{id}", h.GetChatSession)
+	mux.HandleFunc("DELETE /api/chat-sessions/{id}", h.DeleteChatSession)
 	mux.HandleFunc("POST /api/knowledge-bases/{id}/chat", h.ChatKnowledgeBase)
 	mux.HandleFunc("POST /api/chat-sessions/{id}/cancel", h.CancelChatSession)
 	mux.HandleFunc("GET /api/chat-sessions/{id}/citations/{citation}/preview", h.GetCitationPreview)

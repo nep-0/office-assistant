@@ -1,0 +1,948 @@
+openapi: 3.1.0
+info:
+  title: Office Assistant Backend API
+  version: 0.1.0
+  description: Frontend-facing HTTP API for the local Office Assistant deployment.
+servers:
+  - url: http://localhost:8080
+    description: Caddy frontend entrypoint
+security:
+  - sessionCookie: []
+tags:
+  - name: Health
+  - name: Auth
+  - name: Admin
+  - name: Knowledge Bases
+  - name: Documents
+  - name: Chat
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Backend health.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /api/ready:
+    get:
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Dependency readiness.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+  /api/setup/status:
+    get:
+      tags: [Auth]
+      security: []
+      responses:
+        "200":
+          description: First-run setup status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [needs_setup]
+                properties:
+                  needs_setup:
+                    type: boolean
+  /api/setup:
+    post:
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialsRequest"
+      responses:
+        "201":
+          description: First admin created and session cookie issued.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialsRequest"
+      responses:
+        "200":
+          description: Login succeeded and session cookie issued.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      responses:
+        "200":
+          description: Session deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+  /api/admin/status:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Admin route check.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, role]
+                properties:
+                  status:
+                    type: string
+                  role:
+                    type: string
+                    enum: [admin]
+        "403":
+          $ref: "#/components/responses/APIError"
+  /api/admin/activity:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Recent activity events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ActivityEvent"
+  /api/admin/metrics:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Recent workflow metrics.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [metrics]
+                properties:
+                  metrics:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WorkflowMetric"
+  /api/admin/debug:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Debug mode state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DebugMode"
+    put:
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated debug mode state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DebugMode"
+  /api/admin/provider-settings:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Model provider settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [settings]
+                properties:
+                  settings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderSetting"
+  /api/admin/provider-settings/{purpose}:
+    put:
+      tags: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/ProviderPurpose"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProviderSettingRequest"
+      responses:
+        "200":
+          description: Updated provider setting.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderSetting"
+        "400":
+          $ref: "#/components/responses/APIError"
+  /api/knowledge-bases:
+    get:
+      tags: [Knowledge Bases]
+      responses:
+        "200":
+          description: Knowledge Bases visible to the current user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [knowledge_bases]
+                properties:
+                  knowledge_bases:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/KnowledgeBase"
+    post:
+      tags: [Knowledge Bases]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        "201":
+          description: Created Knowledge Base.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBase"
+  /api/knowledge-bases/{knowledge_base_id}:
+    get:
+      tags: [Knowledge Bases]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      responses:
+        "200":
+          description: Knowledge Base detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBase"
+    put:
+      tags: [Knowledge Bases]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                visibility:
+                  $ref: "#/components/schemas/KnowledgeBaseVisibility"
+      responses:
+        "200":
+          description: Updated Knowledge Base.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBase"
+    delete:
+      tags: [Knowledge Bases]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      responses:
+        "200":
+          description: Deleted Knowledge Base.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+  /api/knowledge-bases/{knowledge_base_id}/documents:
+    get:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      responses:
+        "200":
+          description: Documents in the Knowledge Base.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+  /api/knowledge-bases/{knowledge_base_id}/documents/search:
+    get:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+        - name: to
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching documents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+  /api/knowledge-bases/{knowledge_base_id}/documents/upload:
+    post:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+        - name: confirm_duplicate
+          in: query
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Uploaded document record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "409":
+          description: Duplicate content warning.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIError"
+  /api/documents/{document_id}:
+    delete:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Deleted document.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [deleted]
+  /api/documents/{document_id}/reprocess:
+    post:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "202":
+          description: Reprocessing queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [pending]
+  /api/documents/{document_id}/ingestion/cancel:
+    post:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Cancellation requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+  /api/documents/{document_id}/extracted-markdown:
+    get:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Canonical extracted Markdown artifact.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [document_id, markdown]
+                properties:
+                  document_id:
+                    type: integer
+                    format: int64
+                  markdown:
+                    type: string
+  /api/documents/{document_id}/download:
+    get:
+      tags: [Documents]
+      parameters:
+        - $ref: "#/components/parameters/DocumentID"
+      responses:
+        "200":
+          description: Original uploaded document bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+  /api/knowledge-bases/{knowledge_base_id}/chat:
+    post:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Server-sent chat events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Events include start, retrieval, delta, citations, done, and error.
+  /api/knowledge-bases/{knowledge_base_id}/chat-sessions:
+    get:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/KnowledgeBaseID"
+      responses:
+        "200":
+          description: Current user's chat sessions for this Knowledge Base.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ChatSession"
+  /api/chat-sessions/{session_id}:
+    get:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: Chat session transcript.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSessionDetail"
+        "404":
+          $ref: "#/components/responses/APIError"
+    delete:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: Deleted chat session.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [deleted]
+  /api/chat-sessions/{session_id}/cancel:
+    post:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+      responses:
+        "200":
+          description: Cancellation requested for an active chat run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [cancel_requested]
+  /api/chat-sessions/{session_id}/citations/{citation_id}/preview:
+    get:
+      tags: [Chat]
+      parameters:
+        - $ref: "#/components/parameters/SessionID"
+        - name: citation_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Citation source preview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CitationPreview"
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: oa_session
+  responses:
+    APIError:
+      description: Structured API error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+  parameters:
+    KnowledgeBaseID:
+      name: knowledge_base_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    DocumentID:
+      name: document_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    SessionID:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ProviderPurpose:
+      name: purpose
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [chat, embedding]
+  schemas:
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+    HealthResponse:
+      type: object
+      required: [status, service, started_at]
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+    ReadinessResponse:
+      type: object
+      required: [status, dependencies]
+      properties:
+        status:
+          type: string
+          enum: [ready, degraded]
+        dependencies:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/DependencyStatus"
+    DependencyStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+        url:
+          type: string
+        mode:
+          type: string
+        message:
+          type: string
+    CredentialsRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          minLength: 8
+    AuthResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+    User:
+      type: object
+      required: [id, username, role]
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+    ProviderSetting:
+      type: object
+      required: [purpose, base_url, model, api_key_set, updated_at]
+      properties:
+        purpose:
+          type: string
+          enum: [chat, embedding]
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key_set:
+          type: boolean
+        api_key_mask:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    UpdateProviderSettingRequest:
+      type: object
+      required: [base_url, model]
+      properties:
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key:
+          type: string
+        clear_api_key:
+          type: boolean
+    DebugMode:
+      type: object
+      required: [enabled, source, environment_locked, retention_hours]
+      properties:
+        enabled:
+          type: boolean
+        source:
+          type: string
+        environment_locked:
+          type: boolean
+        retention_hours:
+          type: integer
+    ActivityEvent:
+      type: object
+      required: [id, user_id, event_type, entity_type, entity_id, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        event_type:
+          type: string
+        entity_type:
+          type: string
+        entity_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    WorkflowMetric:
+      type: object
+      required: [id, name, value_ms, count, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        value_ms:
+          type: integer
+          format: int64
+        count:
+          type: integer
+          format: int64
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    KnowledgeBaseVisibility:
+      type: string
+      enum: [private, public]
+    KnowledgeBase:
+      type: object
+      required: [id, name, visibility, owner_id, owner_name, can_write, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/KnowledgeBaseVisibility"
+        owner_id:
+          type: integer
+          format: int64
+        owner_name:
+          type: string
+        can_write:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DocumentListResponse:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+    Document:
+      type: object
+      required: [id, knowledge_base_id, original_filename, display_name, content_type, size_bytes, status, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        knowledge_base_id:
+          type: integer
+          format: int64
+        original_filename:
+          type: string
+        display_name:
+          type: string
+        content_type:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [pending, processing, ready, failed, cancelled]
+        error_code:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        session_id:
+          type: string
+        message:
+          type: string
+    ChatSession:
+      type: object
+      required: [id, knowledge_base_id, title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        knowledge_base_id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ChatSessionDetail:
+      type: object
+      required: [session, messages]
+      properties:
+        session:
+          $ref: "#/components/schemas/ChatSession"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+    ChatMessage:
+      type: object
+      required: [id, role, content, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        role:
+          type: string
+          enum: [user, assistant, tool, error]
+        content:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetrievalEvidence"
+        created_at:
+          type: string
+          format: date-time
+    RetrievalEvidence:
+      type: object
+      required: [citation_id, document_id, document_name, text]
+      properties:
+        citation_id:
+          type: string
+        document_id:
+          type: integer
+          format: int64
+        document_name:
+          type: string
+        heading_path:
+          type: string
+        source_anchor:
+          type: object
+          additionalProperties: true
+        text:
+          type: string
+    CitationPreview:
+      type: object
+      required: [session_id, citation_id, document_id, document_name, text, original_download_url]
+      properties:
+        session_id:
+          type: string
+        citation_id:
+          type: string
+        document_id:
+          type: integer
+          format: int64
+        document_name:
+          type: string
+        heading_path:
+          type: string
+        source_anchor:
+          type: object
+          additionalProperties: true
+        text:
+          type: string
+        original_download_url:
+          type: string

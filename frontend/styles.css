@@ -218,6 +218,35 @@ button:hover {
   margin-top: 12px;
 }
 
+.chat-session-bar {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chat-session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-session-item {
+  align-items: center;
+  border-top: 1px solid #e1e7ee;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 10px;
+}
+
+.chat-session-item.selected {
+  border-left: 3px solid #1f6f8b;
+  padding-left: 10px;
+}
+
+.chat-session-item p {
+  margin: 4px 0 0;
+}
+
 .chat-entry {
   border-left: 3px solid #bfccd9;
   color: #253242;
@@ -361,7 +390,8 @@ button:hover {
 
   .inline-form,
   .knowledge-base-item,
-  .document-item {
+  .document-item,
+  .chat-session-item {
     grid-template-columns: 1fr;
   }
 
