@@ -26,6 +26,31 @@ bash scripts/smoke.sh
 
 The smoke check requests the Caddy-served frontend, `/api/health`, and `/api/ready` through the single public entrypoint.
 
+## Start From GHCR Images
+
+After GitHub Actions publishes images, run the stack without local builds:
+
+```sh
+podman compose -f compose.images.yaml up
+```
+
+Use a specific image tag, such as a branch, release tag, or `sha-*` tag:
+
+```sh
+IMAGE_TAG=latest podman compose -f compose.images.yaml up
+```
+
+The image Compose file supports the same local model profile:
+
+```sh
+FAKE_PROVIDERS=false \
+CHAT_PROVIDER_BASE_URL="http://llm:8083/v1" \
+CHAT_MODEL="local-chat" \
+EMBEDDING_PROVIDER_BASE_URL="http://embedding:8084/v1" \
+EMBEDDING_MODEL="local-embedding" \
+podman compose -f compose.images.yaml --profile local-models up
+```
+
 ## Cloud Or Fake Provider Startup
 
 The default Compose startup uses deterministic fake OpenAI-compatible providers so the full UI and backend can run without model credentials:

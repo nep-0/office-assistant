@@ -1,0 +1,78 @@
+services:
+  frontend:
+    image: "${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_REPOSITORY:-nep-0/office-assistant}/frontend:${IMAGE_TAG:-latest}"
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+  backend:
+    image: "${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_REPOSITORY:-nep-0/office-assistant}/backend:${IMAGE_TAG:-latest}"
+    environment:
+      BACKEND_ADDR: ":8080"
+      STORAGE_ROOT: "/data/files"
+      DOCUMENT_URL: "http://document:8081"
+      OCR_URL: "http://ocr:8082"
+      FAKE_PROVIDERS: "${FAKE_PROVIDERS:-true}"
+      CHAT_PROVIDER_BASE_URL: "${CHAT_PROVIDER_BASE_URL:-http://backend:8080/fake-openai}"
+      CHAT_MODEL: "${CHAT_MODEL:-fake-chat}"
+      CHAT_API_KEY: "${CHAT_API_KEY:-}"
+      EMBEDDING_PROVIDER_BASE_URL: "${EMBEDDING_PROVIDER_BASE_URL:-http://backend:8080/fake-openai}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-fake-embedding}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+    depends_on:
+      - document
+      - ocr
+    volumes:
+      - backend-data:/data
+
+  document:
+    image: "${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_REPOSITORY:-nep-0/office-assistant}/document:${IMAGE_TAG:-latest}"
+    environment:
+      DOCUMENT_PORT: "8081"
+      OCR_URL: "http://ocr:8082"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  ocr:
+    image: "${IMAGE_REGISTRY:-ghcr.io}/${IMAGE_REPOSITORY:-nep-0/office-assistant}/ocr:${IMAGE_TAG:-latest}"
+    environment:
+      OCR_PORT: "8082"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  llm:
+    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9717}"
+    profiles:
+      - local-models
+    command:
+      - "-m"
+      - "/models/${LLM_GGUF:-MiniCPM5-1B-Q4_K_M.gguf}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8083"
+    volumes:
+      - "${MODEL_DIR:-/home/jeff/models}:/models:ro"
+
+  embedding:
+    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9717}"
+    profiles:
+      - local-models
+    command:
+      - "-m"
+      - "/models/${EMBEDDING_GGUF:-embeddinggemma-300m-qat-Q8_0.gguf}"
+      - "--embedding"
+      - "--ubatch-size"
+      - "1024"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8084"
+    volumes:
+      - "${MODEL_DIR:-/home/jeff/models}:/models:ro"
+
+volumes:
+  backend-data:
