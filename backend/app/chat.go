@@ -193,12 +193,9 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !retrievalCalled {
-		err := errors.New("knowledge-base answers require retrieval before final response")
-		_ = a.store.AppendChatMessage(context.Background(), domain.ChatMessage{SessionID: sessionRecord.ID, Role: "error", Content: err.Error(), Metadata: "{}"})
-		emit("error", httpapi.APIError{Code: "retrieval_required", Message: err.Error()})
-		return
+		evidence = nil
 	}
-	if len(evidence) == 0 {
+	if len(evidence) == 0 && retrievalCalled {
 		answer = unsupportedAnswerMessage()
 	}
 	_ = a.store.RecordMetric(context.Background(), "chat_token_estimate", 0, int64(ingestionpkg.EstimatedTokenCount(req.Message)+ingestionpkg.EstimatedTokenCount(answer)), map[string]any{"session_id": sessionRecord.ID})

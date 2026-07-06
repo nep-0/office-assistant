@@ -909,7 +909,7 @@ func TestKnowledgeBaseChatStreamingErrorWhenRetrievalFails(t *testing.T) {
 	}
 }
 
-func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
+func TestKnowledgeBaseChatAllowsAnswerWithoutRetrieval(t *testing.T) {
 	a := newTestApp(t)
 	current, err := a.store.FindProviderSetting(context.Background(), providerPurposeChat)
 	if err != nil {
@@ -927,8 +927,21 @@ func TestKnowledgeBaseChatRejectsAnswerWithoutRetrieval(t *testing.T) {
 		t.Fatalf("expected streaming status %d, got %d: %s", http.StatusOK, res.Code, res.Body.String())
 	}
 	events := parseSSEEvents(t, res.Body.String())
-	if len(events["error"]) == 0 || !strings.Contains(events["error"][0], "retrieval_required") {
-		t.Fatalf("expected retrieval_required error, got %+v", events)
+	if len(events["error"]) != 0 {
+		t.Fatalf("expected no streaming error, got %+v", events)
+	}
+	if !strings.Contains(joinDeltaText(t, events["delta"]), "Ungrounded answer.") {
+		t.Fatalf("expected model answer to be streamed, got %+v", events["delta"])
+	}
+	if len(events["citations"]) == 0 || strings.Contains(events["citations"][0], "citation_id") {
+		t.Fatalf("expected empty citations event, got %+v", events["citations"])
+	}
+	messages, err := a.store.ListChatMessages(context.Background(), mustSessionIDFromEvents(t, events), 10)
+	if err != nil {
+		t.Fatalf("list chat messages: %v", err)
+	}
+	if !chatMessagesContainText(messages, "Ungrounded answer.") {
+		t.Fatalf("expected persisted model answer, got %+v", messages)
 	}
 }
 
