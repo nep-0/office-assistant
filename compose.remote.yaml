@@ -1,0 +1,21 @@
+services:
+  backend:
+    environment:
+      FAKE_PROVIDERS: "false"
+      CHAT_PROVIDER_BASE_URL: "https://openrouter.ai/api/v1"
+      CHAT_MODEL: "poolside/laguna-xs.2"
+      CHAT_API_KEY: ""
+      EMBEDDING_PROVIDER_BASE_URL: "https://openrouter.ai/api/v1"
+      EMBEDDING_MODEL: "qwen/qwen3-embedding-8b"
+      EMBEDDING_API_KEY: ""
+    depends_on:
+      - document
+      - ocr
+
+  llm:
+    profiles:
+      - local-models
+
+  embedding:
+    profiles:
+      - local-models

@@ -1,6 +1,7 @@
 import json
 import posixpath
 import tempfile
+import urllib.error
 import urllib.request
 
 from markitdown import MarkItDown
@@ -84,9 +85,23 @@ def call_ocr(data, filename, ocr_url, ocr_func):
         headers={"Content-Type": "application/octet-stream", "X-Filename": filename},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise ExtractionError("ocr_failed", ocr_error_message(body, error.reason)) from error
+    except urllib.error.URLError as error:
+        raise ExtractionError("ocr_unavailable", str(error.reason)) from error
     text = payload.get("text", "")
     if not text.strip():
         raise ExtractionError("ocr_empty", "OCR produced no text")
     return text
+
+
+def ocr_error_message(body, fallback):
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return body.strip() or str(fallback)
+    return payload.get("message") or payload.get("code") or str(fallback)

@@ -1,8 +1,8 @@
 # Runbook
 
-## Start The Skeleton Stack
+## Start The Local Stack
 
-The project is designed for Compose-compatible Podman first, while staying compatible with Docker Compose where practical.
+The project is designed for Compose-compatible Podman first, while staying compatible with Docker Compose where practical. The default Compose file starts local llama.cpp chat and embedding services.
 
 ```sh
 podman compose up --build
@@ -14,7 +14,7 @@ If using Docker Compose:
 docker compose up --build
 ```
 
-The frontend is available at `http://localhost:8080` by default. Set `FRONTEND_PORT` to use another host port.
+The frontend is available at `http://localhost:8080` by default. Edit `compose.yaml` if another host port, image, model directory, or model filename is needed.
 
 ## Smoke Check
 
@@ -28,85 +28,80 @@ The smoke check requests the Caddy-served frontend, `/api/health`, and `/api/rea
 
 ## Start From GHCR Images
 
-After GitHub Actions publishes images, run the stack without local builds:
+After GitHub Actions publishes images, run the local-model stack without local builds:
 
 ```sh
 podman compose -f compose.images.yaml up
 ```
 
-Use a specific image tag, such as a branch, release tag, or `sha-*` tag:
+The image Compose file uses `:latest` images by default. Edit `compose.images.yaml` to use another image tag, branch tag, release tag, or `sha-*` tag.
+
+Use the same remote override with published images when testing against a cloud provider:
 
 ```sh
-IMAGE_TAG=latest podman compose -f compose.images.yaml up
+podman compose -f compose.images.yaml -f compose.remote.yaml up
 ```
 
-The image Compose file supports the same local model profile:
+## Cloud Provider Startup
+
+The remote override uses OpenRouter-compatible provider settings with `poolside/laguna-xs.2` for chat and `qwen/qwen3-embedding-8b` for embeddings. Before first boot, edit the backend environment in `compose.remote.yaml` and set the chat and embedding API keys:
 
 ```sh
-FAKE_PROVIDERS=false \
-CHAT_PROVIDER_BASE_URL="http://llm:8083/v1" \
-CHAT_MODEL="local-chat" \
-EMBEDDING_PROVIDER_BASE_URL="http://embedding:8084/v1" \
-EMBEDDING_MODEL="local-embedding" \
-podman compose -f compose.images.yaml --profile local-models up
-```
-
-## Cloud Or Fake Provider Startup
-
-The default Compose startup uses deterministic fake OpenAI-compatible providers so the full UI and backend can run without model credentials:
-
-```sh
-podman compose up --build
-```
-
-For cloud testing, keep the same containers but pass provider settings through environment variables before first boot:
-
-```sh
-OPENROUTER_API_KEY="..." bash scripts/setup-cloud.sh
+podman compose -f compose.yaml -f compose.remote.yaml up --build
 ```
 
 If SQLite already contains provider settings, update them in the admin UI or reset the backend volume for a fresh first-boot seed.
 
-`scripts/setup-cloud.sh` defaults to OpenRouter-compatible settings with `poolside/laguna-xs.2` for chat and `qwen/qwen3-embedding-8b` for embeddings. Override `CHAT_PROVIDER_BASE_URL`, `CHAT_MODEL`, `CHAT_API_KEY`, `EMBEDDING_PROVIDER_BASE_URL`, `EMBEDDING_MODEL`, or `EMBEDDING_API_KEY` for another OpenAI-compatible provider. Set `CONTAINER_ENGINE=docker` to use Docker Compose.
+Set `CHAT_PROVIDER_BASE_URL`, `CHAT_MODEL`, `CHAT_API_KEY`, `EMBEDDING_PROVIDER_BASE_URL`, `EMBEDDING_MODEL`, and `EMBEDDING_API_KEY` directly in `compose.remote.yaml` for another OpenAI-compatible provider.
 
 ## Local Model Startup
 
-The local model path uses the `local-models` Compose profile. Place GGUF files in a host model directory and point Compose at it:
+The default Compose file expects these GGUF files:
 
 ```sh
 ls /home/jeff/models/MiniCPM5-1B-Q4_K_M.gguf
 ls /home/jeff/models/embeddinggemma-300m-qat-Q8_0.gguf
 ```
 
-Start the stack with cloud providers disabled and both model endpoints set to the internal llama.cpp servers:
+Start the stack:
 
 ```sh
-bash scripts/setup-local.sh
+podman compose up --build
 ```
 
-Docker Compose uses the same script with `CONTAINER_ENGINE=docker`:
+Docker Compose uses the same file:
 
 ```sh
-CONTAINER_ENGINE=docker bash scripts/setup-local.sh
+docker compose up --build
 ```
 
-The default local profile uses `ghcr.io/ggml-org/llama.cpp:server-b9717`, `/home/jeff/models/MiniCPM5-1B-Q4_K_M.gguf` for chat, `/home/jeff/models/embeddinggemma-300m-qat-Q8_0.gguf` for embeddings, targets ordinary CPU deployment, sets `-ngl 0` for both llama.cpp servers, and uses conservative context defaults. Override `LLAMA_CPP_IMAGE`, `MODEL_DIR`, `LLM_GGUF`, `EMBEDDING_GGUF`, `LLM_CONTEXT_SIZE`, `LLM_GPU_LAYERS`, or `EMBEDDING_GPU_LAYERS` only when the deployment machine has the matching image, model files, memory, or GPU support.
+The default local services use `ghcr.io/ggml-org/llama.cpp:server-b9717`, `/home/jeff/models/MiniCPM5-1B-Q4_K_M.gguf` for chat, and `/home/jeff/models/embeddinggemma-300m-qat-Q8_0.gguf` for embeddings. Edit `compose.yaml` if the deployment machine uses a different image, model directory, or model filename.
 
 Local models can take a while to load. `/api/ready` reports `degraded` with a provider message while the llama.cpp `/v1/models` endpoint is unreachable, then returns `ready` after both chat and embedding providers respond.
 
 ## Offline Smoke Check
 
-After the local-model stack is ready, run the end-to-end offline smoke:
+After the local stack is ready, run the end-to-end offline smoke:
 
 ```sh
 bash scripts/offline-smoke.sh
 ```
 
-The script creates a small synthetic DOCX, creates or logs in as a local admin, creates a knowledge base, uploads the document, polls ingestion, asks a knowledge-base question, requires citations, and writes `artifacts/offline-smoke/report.json`. Keep cloud provider environment variables unset for this proof path except for the local URLs shown above.
+The script creates a small synthetic DOCX, creates or logs in as a local admin, creates a knowledge base, uploads the document, polls ingestion, asks a knowledge-base question, requires citations, and writes `artifacts/offline-smoke/report.json`.
+
+## OCR Service
+
+The OCR service uses PaddleOCR's PP-OCR pipeline on CPU by default:
+
+```sh
+podman compose up
+```
+
+PaddleOCR, PaddleX, and ModelScope files are cached in named volumes mounted at `/root/.cache`, `/root/.paddlex`, and `/root/.modelscope`. The first OCR request may take longer while models are prepared.
 
 ## Model Provider Defaults
 
-The backend seeds first-boot Dual-Mode Model Provider settings from environment variables:
+The backend seeds first-boot Dual-Mode Model Provider settings from its container environment declared in `compose.yaml` or the active override file:
 
 - `CHAT_PROVIDER_BASE_URL`
 - `CHAT_MODEL`

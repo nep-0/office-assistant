@@ -5,7 +5,7 @@ from io import BytesIO
 from openpyxl import Workbook
 from pptx import Presentation
 
-from extractor import ExtractionError, extract_upload
+from extractor import ExtractionError, extract_upload, ocr_error_message
 
 
 class ExtractorTests(unittest.TestCase):
@@ -70,6 +70,11 @@ class ExtractorTests(unittest.TestCase):
             extract_upload("notes.txt", b"hello")
 
         self.assertEqual(caught.exception.code, "unsupported_office_input")
+
+    def test_ocr_error_message_uses_service_payload(self):
+        message = ocr_error_message('{"code":"ppocr_failed","message":"cache is read-only"}', "Bad Gateway")
+
+        self.assertEqual(message, "cache is read-only")
 
 
 def make_zip(files):
