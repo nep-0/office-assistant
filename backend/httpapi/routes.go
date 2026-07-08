@@ -15,6 +15,10 @@ type Handlers struct {
 	GetMetrics              http.HandlerFunc
 	GetDebugMode            http.HandlerFunc
 	UpdateDebugMode         http.HandlerFunc
+	ListUsers               http.HandlerFunc
+	CreateUser              http.HandlerFunc
+	UpdateUser              http.HandlerFunc
+	DeleteUser              http.HandlerFunc
 	GetProviderSettings     http.HandlerFunc
 	UpdateProviderSetting   http.HandlerFunc
 	ListKnowledgeBases      http.HandlerFunc
@@ -51,6 +55,10 @@ func RegisterRoutes(mux *http.ServeMux, h Handlers) {
 	mux.HandleFunc("GET /api/admin/metrics", h.GetMetrics)
 	mux.HandleFunc("GET /api/admin/debug", h.GetDebugMode)
 	mux.HandleFunc("PUT /api/admin/debug", h.UpdateDebugMode)
+	mux.HandleFunc("GET /api/admin/users", h.ListUsers)
+	mux.HandleFunc("POST /api/admin/users", h.CreateUser)
+	mux.HandleFunc("PUT /api/admin/users/{id}", h.UpdateUser)
+	mux.HandleFunc("DELETE /api/admin/users/{id}", h.DeleteUser)
 	mux.HandleFunc("GET /api/admin/provider-settings", h.GetProviderSettings)
 	mux.HandleFunc("PUT /api/admin/provider-settings/{purpose}", h.UpdateProviderSetting)
 	mux.HandleFunc("GET /api/knowledge-bases", h.ListKnowledgeBases)

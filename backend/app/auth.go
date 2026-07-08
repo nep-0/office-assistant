@@ -142,6 +142,9 @@ func (a *app) createUserWithPassword(r *http.Request, username, password, role s
 	if len(password) < 8 {
 		return domain.User{}, errors.New("password_too_short")
 	}
+	if !validRole(role) {
+		return domain.User{}, errInvalidRole
+	}
 	hash, err := authpkg.HashPassword(password)
 	if err != nil {
 		return domain.User{}, err

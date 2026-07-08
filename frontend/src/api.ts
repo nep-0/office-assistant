@@ -160,6 +160,12 @@ export const api = {
   health: () => request<{ status: string; service: string; started_at: string }>("/api/health"),
   ready: () => request<{ status: "ready" | "degraded"; dependencies: Record<string, { status: string; message?: string }> }>("/api/ready"),
   adminStatus: () => request<{ status: string; role: "admin" }>("/api/admin/status"),
+  adminUsers: () => request<{ users: User[] }>("/api/admin/users"),
+  createAdminUser: (body: { username: string; password: string; role?: Role }) =>
+    request<AuthResponse>("/api/admin/users", { method: "POST", body: JSON.stringify(body) }),
+  updateAdminUser: (id: number, body: { username?: string; password?: string; role?: Role }) =>
+    request<AuthResponse>(`/api/admin/users/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteAdminUser: (id: number) => request<{ status: string }>(`/api/admin/users/${id}`, { method: "DELETE" }),
   activity: () => request<{ events: ActivityEvent[] }>("/api/admin/activity"),
   metrics: () => request<{ metrics: WorkflowMetric[] }>("/api/admin/metrics"),
   debug: () => request<DebugMode>("/api/admin/debug"),

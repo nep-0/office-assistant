@@ -220,6 +220,86 @@ func TestMemberCannotUseAdminRoute(t *testing.T) {
 	}
 }
 
+func TestAdminCanManageUsers(t *testing.T) {
+	a := newTestApp(t)
+	adminCookie := loginAs(t, a, "admin", authpkg.RoleAdmin)
+
+	create := performJSONWithCookie(t, a, http.MethodPost, "/api/admin/users", `{"username":"Alice","password":"password123","role":"member"}`, adminCookie)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create user: %d %s", create.Code, create.Body.String())
+	}
+	var created authResponse
+	decodeRecorder(t, create, &created)
+	if created.User.Username != "alice" || created.User.Role != authpkg.RoleMember {
+		t.Fatalf("unexpected created user: %+v", created.User)
+	}
+
+	list := performJSONWithCookie(t, a, http.MethodGet, "/api/admin/users", "", adminCookie)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list users: %d %s", list.Code, list.Body.String())
+	}
+	var listed adminUsersResponse
+	decodeRecorder(t, list, &listed)
+	if len(listed.Users) != 2 {
+		t.Fatalf("expected two users, got %+v", listed.Users)
+	}
+
+	update := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(created.User.ID, 10), `{"username":"Alice2","password":"newpassword123","role":"admin"}`, adminCookie)
+	if update.Code != http.StatusOK {
+		t.Fatalf("update user: %d %s", update.Code, update.Body.String())
+	}
+	var updated authResponse
+	decodeRecorder(t, update, &updated)
+	if updated.User.Username != "alice2" || updated.User.Role != authpkg.RoleAdmin {
+		t.Fatalf("unexpected updated user: %+v", updated.User)
+	}
+	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"alice2","password":"newpassword123"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("updated user could not log in: %d %s", login.Code, login.Body.String())
+	}
+
+	deleted := performJSONWithCookie(t, a, http.MethodDelete, "/api/admin/users/"+strconv.FormatInt(updated.User.ID, 10), "", adminCookie)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete user: %d %s", deleted.Code, deleted.Body.String())
+	}
+	missing := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(updated.User.ID, 10), `{"role":"member"}`, adminCookie)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("expected deleted user to be missing, got %d %s", missing.Code, missing.Body.String())
+	}
+}
+
+func TestAdminUserManagementGuardrails(t *testing.T) {
+	a := newTestApp(t)
+	admin := createUserForTest(t, a, "admin", "password123", authpkg.RoleAdmin)
+	adminCookie := loginAsExisting(t, a, "admin", "password123")
+
+	duplicate := performJSONWithCookie(t, a, http.MethodPost, "/api/admin/users", `{"username":"admin","password":"password123","role":"member"}`, adminCookie)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate conflict, got %d %s", duplicate.Code, duplicate.Body.String())
+	}
+
+	selfDemote := performJSONWithCookie(t, a, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(admin.ID, 10), `{"role":"member"}`, adminCookie)
+	if selfDemote.Code != http.StatusBadRequest {
+		t.Fatalf("expected self demote rejection, got %d %s", selfDemote.Code, selfDemote.Body.String())
+	}
+
+	selfDelete := performJSONWithCookie(t, a, http.MethodDelete, "/api/admin/users/"+strconv.FormatInt(admin.ID, 10), "", adminCookie)
+	if selfDelete.Code != http.StatusBadRequest {
+		t.Fatalf("expected self delete rejection, got %d %s", selfDelete.Code, selfDelete.Body.String())
+	}
+
+	memberCookie := loginAs(t, a, "owner", authpkg.RoleMember)
+	owned := createKnowledgeBaseForTest(t, a, memberCookie, "Owned")
+	owner, err := a.store.FindUserByUsername(context.Background(), "owner")
+	if err != nil {
+		t.Fatalf("find owner: %v", err)
+	}
+	deleteOwner := performJSONWithCookie(t, a, http.MethodDelete, "/api/admin/users/"+strconv.FormatInt(owner.ID, 10), "", adminCookie)
+	if deleteOwner.Code != http.StatusConflict {
+		t.Fatalf("expected owned user delete conflict for kb %d, got %d %s", owned.ID, deleteOwner.Code, deleteOwner.Body.String())
+	}
+}
+
 func TestInvalidLoginReturnsStructuredError(t *testing.T) {
 	a := newTestApp(t)
 	createUserForTest(t, a, "admin", "password123", authpkg.RoleAdmin)
@@ -1196,7 +1276,12 @@ func createUserForTest(t *testing.T, a *app, username, password, role string) do
 func loginAs(t *testing.T, a *app, username, role string) *http.Cookie {
 	t.Helper()
 	createUserForTest(t, a, username, "password123", role)
-	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"`+username+`","password":"password123"}`)
+	return loginAsExisting(t, a, username, "password123")
+}
+
+func loginAsExisting(t *testing.T, a *app, username, password string) *http.Cookie {
+	t.Helper()
+	login := performJSON(t, a, http.MethodPost, "/api/auth/login", `{"username":"`+username+`","password":"`+password+`"}`)
 	if login.Code != http.StatusOK {
 		t.Fatalf("login as %s: %d %s", username, login.Code, login.Body.String())
 	}

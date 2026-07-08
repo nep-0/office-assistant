@@ -203,6 +203,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DebugMode"
+  /api/admin/users:
+    get:
+      tags: [Admin]
+      responses:
+        "200":
+          description: Users visible to administrators.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUsersResponse"
+        "403":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateUserRequest"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+  /api/admin/users/{id}:
+    put:
+      tags: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminUpdateUserRequest"
+      responses:
+        "200":
+          description: User updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+    delete:
+      tags: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: User deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
   /api/admin/provider-settings:
     get:
       tags: [Admin]
@@ -614,6 +686,13 @@ components:
       required: true
       schema:
         type: string
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
     ProviderPurpose:
       name: purpose
       in: path
@@ -688,6 +767,14 @@ components:
       properties:
         user:
           $ref: "#/components/schemas/User"
+    AdminUsersResponse:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
     User:
       type: object
       required: [id, username, role]
@@ -697,6 +784,30 @@ components:
           format: int64
         username:
           type: string
+        role:
+          type: string
+          enum: [admin, member]
+    AdminCreateUserRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        role:
+          type: string
+          enum: [admin, member]
+          default: member
+    AdminUpdateUserRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          minLength: 8
         role:
           type: string
           enum: [admin, member]

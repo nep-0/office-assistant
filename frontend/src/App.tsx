@@ -21,6 +21,8 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  UserPlus,
+  Users,
   X,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
@@ -37,6 +39,7 @@ import {
   DocumentRecord,
   KnowledgeBase,
   ProviderSetting,
+  Role,
   RetrievalEvidence,
   streamChat,
   User,
@@ -784,21 +787,24 @@ function AdminView({ notify }: { notify: (tone: Toast["tone"], message: string) 
   const [status, setStatus] = useState<string>("checking");
   const [debug, setDebug] = useState<DebugMode | null>(null);
   const [providers, setProviders] = useState<ProviderSetting[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [metrics, setMetrics] = useState<WorkflowMetric[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [admin, debugData, providerData, activityData, metricData] = await Promise.all([
+      const [admin, debugData, providerData, usersData, activityData, metricData] = await Promise.all([
         api.adminStatus(),
         api.debug(),
         api.providerSettings(),
+        api.adminUsers(),
         api.activity(),
         api.metrics(),
       ]);
       setStatus(admin.status);
       setDebug(debugData);
       setProviders(providerData.settings);
+      setUsers(usersData.users);
       setEvents(activityData.events);
       setMetrics(metricData.metrics);
     } catch (error) {
@@ -884,6 +890,7 @@ function AdminView({ notify }: { notify: (tone: Toast["tone"], message: string) 
           ))}
         </div>
       </section>
+      <UserManagement users={users} setUsers={setUsers} notify={notify} />
       <section className="panel two-column">
         <div>
           <h2>Recent activity</h2>
@@ -912,6 +919,124 @@ function AdminView({ notify }: { notify: (tone: Toast["tone"], message: string) 
         </div>
       </section>
     </div>
+  );
+}
+
+function UserManagement({
+  users,
+  setUsers,
+  notify,
+}: {
+  users: User[];
+  setUsers: (users: User[] | ((users: User[]) => User[])) => void;
+  notify: (tone: Toast["tone"], message: string) => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<Role>("member");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editUsername, setEditUsername] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editRole, setEditRole] = useState<Role>("member");
+
+  async function createUser(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const response = await api.createAdminUser({ username: username.trim(), password, role });
+      setUsers((items) => [...items, response.user].sort((a, b) => a.username.localeCompare(b.username)));
+      setUsername("");
+      setPassword("");
+      setRole("member");
+      notify("success", "User created");
+    } catch (error) {
+      notify("error", getError(error));
+    }
+  }
+
+  async function saveUser(user: User) {
+    const body: { username?: string; password?: string; role?: Role } = {};
+    if (editUsername.trim() && editUsername.trim() !== user.username) body.username = editUsername.trim();
+    if (editPassword) body.password = editPassword;
+    if (editRole !== user.role) body.role = editRole;
+    try {
+      const response = await api.updateAdminUser(user.id, body);
+      setUsers((items) => items.map((item) => (item.id === user.id ? response.user : item)));
+      setEditingId(null);
+      setEditPassword("");
+      notify("success", "User updated");
+    } catch (error) {
+      notify("error", getError(error));
+    }
+  }
+
+  async function deleteUser(id: number) {
+    try {
+      await api.deleteAdminUser(id);
+      setUsers((items) => items.filter((item) => item.id !== id));
+      notify("success", "User deleted");
+    } catch (error) {
+      notify("error", getError(error));
+    }
+  }
+
+  return (
+    <section className="panel users-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Users</h2>
+          <p>{users.length} accounts</p>
+        </div>
+        <Users size={22} />
+      </div>
+      <form className="user-create-form" onSubmit={createUser}>
+        <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Username" required />
+        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Temporary password" minLength={8} type="password" required />
+        <select value={role} onChange={(event) => setRole(event.target.value as Role)}>
+          <option value="member">Member</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button className="primary-button">
+          <UserPlus size={17} /> Add
+        </button>
+      </form>
+      <div className="user-list">
+        {users.map((user) => (
+          <article className="user-row" key={user.id}>
+            {editingId === user.id ? (
+              <form className="user-edit-form" onSubmit={(event) => { event.preventDefault(); saveUser(user); }}>
+                <input value={editUsername} onChange={(event) => setEditUsername(event.target.value)} />
+                <input value={editPassword} onChange={(event) => setEditPassword(event.target.value)} placeholder="New password optional" minLength={8} type="password" />
+                <select value={editRole} onChange={(event) => setEditRole(event.target.value as Role)}>
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <button className="icon-button solid" title="Save user">
+                  <Check size={16} />
+                </button>
+                <button className="icon-button" onClick={() => setEditingId(null)} title="Cancel edit" type="button">
+                  <X size={16} />
+                </button>
+              </form>
+            ) : (
+              <>
+                <div className="user-identity">
+                  <strong>{user.username}</strong>
+                  <span>{user.role}</span>
+                </div>
+                <div className="row-actions">
+                  <button className="icon-button" onClick={() => { setEditingId(user.id); setEditUsername(user.username); setEditRole(user.role); setEditPassword(""); }} title="Edit user">
+                    <Pencil size={15} />
+                  </button>
+                  <button className="icon-button danger" onClick={() => deleteUser(user.id)} title="Delete user">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

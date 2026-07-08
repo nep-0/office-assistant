@@ -816,6 +816,7 @@ h2 {
 
 .admin-layout .full,
 .admin-layout .stat-grid,
+.admin-layout .users-panel,
 .admin-layout .two-column {
   grid-column: 1 / -1;
 }
@@ -892,6 +893,60 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.66);
+}
+
+.users-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.user-create-form,
+.user-edit-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(190px, 1fr) 150px auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.user-list {
+  display: grid;
+  gap: 10px;
+}
+
+.user-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.user-edit-form {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(150px, 1fr) minmax(190px, 1fr) 150px auto auto;
+}
+
+.user-identity {
+  min-width: 0;
+}
+
+.user-identity strong,
+.user-identity span {
+  display: block;
+}
+
+.user-identity strong {
+  overflow-wrap: anywhere;
+}
+
+.user-identity span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: capitalize;
 }
 
 .checkbox-label {
@@ -1116,6 +1171,8 @@ h2 {
   .chat-layout,
   .admin-layout,
   .provider-grid,
+  .user-create-form,
+  .user-edit-form,
   .two-column,
   .stat-grid,
   .auth-screen {
