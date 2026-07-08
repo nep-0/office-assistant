@@ -21,12 +21,11 @@ import (
 )
 
 const (
-	chatAppName        = "office-assistant"
-	retrievalToolName  = "retrieve_knowledge"
-	maxRetrievalLimit  = 5
-	vectorProbeLimit   = 20
-	chatHistoryLimit   = 12
-	chatRequestTimeout = 2 * time.Minute
+	chatAppName       = "office-assistant"
+	retrievalToolName = "retrieve_knowledge"
+	maxRetrievalLimit = 5
+	vectorProbeLimit  = 20
+	chatHistoryLimit  = 12
 )
 
 type chatRequest struct {
@@ -163,7 +162,7 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not prepare chat session", nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), chatRequestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), a.chatRequestTimeout())
 	defer cancel()
 	a.registerChatCancel(sessionRecord.ID, cancel)
 	defer a.unregisterChatCancel(sessionRecord.ID)
@@ -289,7 +288,7 @@ func (a *app) runKnowledgeBaseAgent(ctx context.Context, current domain.User, kb
 			if err != nil {
 				return nil, err
 			}
-			return providers.ChatModel(setting, a.config.fakeProviders, a.httpClient, retrievalToolName, maxRetrievalLimit)
+			return providers.ChatModel(setting, a.config.fakeProviders, a.chatClient(), retrievalToolName, maxRetrievalLimit)
 		},
 		RecordPrompt: func(ctx context.Context, kb domain.KnowledgeBase, sessionID, prompt string) {
 			if !a.debugEnabled(ctx) {

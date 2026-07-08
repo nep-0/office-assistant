@@ -17,6 +17,7 @@ services:
       STORAGE_ROOT: "/data/files"
       DOCUMENT_URL: "http://document:8081"
       OCR_URL: "http://ocr:8082"
+      CHAT_REQUEST_TIMEOUT: "10m"
       FAKE_PROVIDERS: "false"
       CHAT_PROVIDER_BASE_URL: "http://llm:8083/v1"
       CHAT_MODEL: "local-chat"

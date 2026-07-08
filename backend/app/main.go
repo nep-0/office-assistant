@@ -22,20 +22,22 @@ type app struct {
 	config           config
 	store            *storepkg.Store
 	httpClient       *http.Client
+	chatHTTPClient   *http.Client
 	chunkingStrategy ingestionpkg.ChunkingStrategy
 	vectorIndex      *search.VectorIndex
 	activeChats      *chatpkg.CancelRegistry
 }
 
 type config struct {
-	addr             string
-	databasePath     string
-	storageRoot      string
-	documentURL      string
-	ocrURL           string
-	fakeProviders    bool
-	debugEnvEnabled  bool
-	defaultProviders map[string]domain.ProviderSetting
+	addr               string
+	databasePath       string
+	storageRoot        string
+	documentURL        string
+	ocrURL             string
+	fakeProviders      bool
+	debugEnvEnabled    bool
+	chatRequestTimeout time.Duration
+	defaultProviders   map[string]domain.ProviderSetting
 }
 
 type healthResponse struct {
@@ -75,6 +77,7 @@ func Run() {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		chatHTTPClient: &http.Client{},
 	}
 	vectorIndex, err := search.NewVectorIndex(a.embeddingFunc(), cfg.storageRoot)
 	if err != nil {
@@ -120,16 +123,31 @@ func (a *app) documentLifecycle() docpkg.Lifecycle {
 	}
 }
 
+func (a *app) chatClient() *http.Client {
+	if a.chatHTTPClient != nil {
+		return a.chatHTTPClient
+	}
+	return a.httpClient
+}
+
+func (a *app) chatRequestTimeout() time.Duration {
+	if a.config.chatRequestTimeout > 0 {
+		return a.config.chatRequestTimeout
+	}
+	return defaultChatRequestTimeout
+}
+
 func loadConfig() config {
 	fakeProviders := utils.Env("FAKE_PROVIDERS", "true") == "true"
 	return config{
-		addr:            utils.Env("BACKEND_ADDR", ":8080"),
-		databasePath:    utils.Env("DATABASE_PATH", "/data/office-assistant.db"),
-		storageRoot:     utils.Env("STORAGE_ROOT", "/data/files"),
-		documentURL:     utils.Env("DOCUMENT_URL", "http://document:8081"),
-		ocrURL:          utils.Env("OCR_URL", "http://ocr:8082"),
-		fakeProviders:   fakeProviders,
-		debugEnvEnabled: utils.Env("DEBUG_MODE", "false") == "true",
+		addr:               utils.Env("BACKEND_ADDR", ":8080"),
+		databasePath:       utils.Env("DATABASE_PATH", "/data/office-assistant.db"),
+		storageRoot:        utils.Env("STORAGE_ROOT", "/data/files"),
+		documentURL:        utils.Env("DOCUMENT_URL", "http://document:8081"),
+		ocrURL:             utils.Env("OCR_URL", "http://ocr:8082"),
+		fakeProviders:      fakeProviders,
+		debugEnvEnabled:    utils.Env("DEBUG_MODE", "false") == "true",
+		chatRequestTimeout: durationEnv("CHAT_REQUEST_TIMEOUT", defaultChatRequestTimeout),
 		defaultProviders: map[string]domain.ProviderSetting{
 			providerPurposeChat: {
 				Purpose: providerPurposeChat,
@@ -145,6 +163,21 @@ func loadConfig() config {
 			},
 		},
 	}
+}
+
+const defaultChatRequestTimeout = 10 * time.Minute
+
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	raw := utils.Env(key, "")
+	if raw == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("invalid %s=%q, using %s", key, raw, fallback)
+		return fallback
+	}
+	return duration
 }
 
 func (a *app) routes(mux *http.ServeMux) {

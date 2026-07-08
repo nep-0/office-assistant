@@ -106,9 +106,12 @@ The backend seeds first-boot Dual-Mode Model Provider settings from its containe
 - `CHAT_PROVIDER_BASE_URL`
 - `CHAT_MODEL`
 - `CHAT_API_KEY`
+- `CHAT_REQUEST_TIMEOUT`
 - `EMBEDDING_PROVIDER_BASE_URL`
 - `EMBEDDING_MODEL`
 - `EMBEDDING_API_KEY`
+
+`CHAT_REQUEST_TIMEOUT` defaults to `10m` in Compose. Increase it in the Compose file for low-end local hardware or intentionally long generations.
 
 Admins can change the active chat and embedding provider settings in the UI after login. API keys stay backend-side, are masked in API responses, and are not written into frontend assets.
 
