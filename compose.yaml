@@ -48,17 +48,8 @@ services:
       dockerfile: ocr/Containerfile
     environment:
       OCR_PORT: "8082"
-      PADDLEOCR_LANG: "en"
       PADDLEOCR_DEVICE: "cpu"
-      PADDLE_PDX_CACHE_HOME: "/root/.paddlex"
-      MODELSCOPE_CACHE: "/root/.modelscope"
     read_only: true
-    security_opt:
-      - label=disable
-    volumes:
-      - ocr-cache:/root/.cache:Z
-      - ocr-paddlex-data:/root/.paddlex:Z
-      - ocr-modelscope-cache:/root/.modelscope:Z
     tmpfs:
       - /tmp
 
@@ -91,6 +82,3 @@ services:
 
 volumes:
   backend-data:
-  ocr-cache:
-  ocr-paddlex-data:
-  ocr-modelscope-cache:

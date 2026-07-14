@@ -1,11 +1,12 @@
 import unittest
 import zipfile
 from io import BytesIO
+from unittest.mock import patch
 
 from openpyxl import Workbook
 from pptx import Presentation
 
-from extractor import ExtractionError, extract_upload, ocr_error_message, ocr_header_filename
+from extractor import ExtractionError, call_ocr, extract_upload, ocr_error_message, ocr_header_filename
 
 
 class ExtractorTests(unittest.TestCase):
@@ -89,6 +90,13 @@ class ExtractorTests(unittest.TestCase):
         message = ocr_error_message('{"code":"ppocr_failed","message":"cache is read-only"}', "Bad Gateway")
 
         self.assertEqual(message, "cache is read-only")
+
+    def test_ocr_timeout_is_structured_extraction_error(self):
+        with patch("urllib.request.urlopen", side_effect=TimeoutError()):
+            with self.assertRaises(ExtractionError) as caught:
+                call_ocr(b"image", "scan.png", "http://ocr.test", None)
+
+        self.assertEqual(caught.exception.code, "ocr_timeout")
 
 
 def make_zip(files):

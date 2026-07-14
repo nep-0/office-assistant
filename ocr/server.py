@@ -50,6 +50,10 @@ def ppocr_available():
     return importlib.util.find_spec("paddleocr") is not None and importlib.util.find_spec("paddle") is not None
 
 
+def ppocr_ready():
+    return _OCR_ENGINE is not None
+
+
 def get_ppocr():
     global _OCR_ENGINE
     if _OCR_ENGINE is None:
@@ -58,7 +62,22 @@ def get_ppocr():
         except ImportError as error:
             raise OCRError("ppocr_unavailable", "PaddleOCR is not installed", 503) from error
         _OCR_ENGINE = PaddleOCR(
-            lang=os.environ.get("PADDLEOCR_LANG", "en"),
+            text_detection_model_name=os.environ.get(
+                "PADDLEOCR_DETECTION_MODEL",
+                "PP-OCRv5_mobile_det",
+            ),
+            text_detection_model_dir=os.environ.get(
+                "PADDLEOCR_DETECTION_MODEL_DIR",
+                "/opt/ocr-models/official_models/PP-OCRv5_mobile_det",
+            ),
+            text_recognition_model_name=os.environ.get(
+                "PADDLEOCR_RECOGNITION_MODEL",
+                "en_PP-OCRv5_mobile_rec",
+            ),
+            text_recognition_model_dir=os.environ.get(
+                "PADDLEOCR_RECOGNITION_MODEL_DIR",
+                "/opt/ocr-models/official_models/en_PP-OCRv5_mobile_rec",
+            ),
             device=os.environ.get("PADDLEOCR_DEVICE", "cpu"),
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
@@ -143,15 +162,25 @@ def is_number(value):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/health", "/ready"):
+        if self.path == "/health":
+            self.send_json(200, {
+                "status": "alive",
+                "service": "ocr",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return
+
+        if self.path == "/ready":
             mode = os.environ.get("OCR_MODE", "ppocr")
             available = ppocr_available()
-            status = "ready" if mode == "fake" or available else "degraded"
-            self.send_json(200, {
+            ready = mode == "fake" or ppocr_ready()
+            status = "ready" if ready else "initializing" if available else "degraded"
+            self.send_json(200 if ready else 503, {
                 "status": status,
                 "service": "ocr",
                 "mode": mode,
                 "ppocr_available": available,
+                "ppocr_ready": ready,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             })
             return
@@ -189,6 +218,13 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("OCR_PORT", "8082"))
+    if os.environ.get("OCR_MODE", "ppocr") != "fake":
+        print("initializing PaddleOCR")
+        try:
+            get_ppocr()
+            print("PaddleOCR ready")
+        except OCRError as error:
+            print(f"PaddleOCR initialization failed: {error.message}", file=sys.stderr)
     server = HTTPServer(("", port), Handler)
     signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     print(f"ocr service listening on :{port}")

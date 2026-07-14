@@ -11,6 +11,7 @@ from markitdown._exceptions import FileConversionException
 SCHEMA_VERSION = "v1"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".pptx"}
+OCR_TIMEOUT_SECONDS = 10 * 60
 
 
 class ExtractionError(Exception):
@@ -86,13 +87,15 @@ def call_ocr(data, filename, ocr_url, ocr_func):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=OCR_TIMEOUT_SECONDS) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
         raise ExtractionError("ocr_failed", ocr_error_message(body, error.reason)) from error
     except urllib.error.URLError as error:
         raise ExtractionError("ocr_unavailable", str(error.reason)) from error
+    except TimeoutError as error:
+        raise ExtractionError("ocr_timeout", "OCR service timed out") from error
     text = payload.get("text", "")
     if not text.strip():
         raise ExtractionError("ocr_empty", "OCR produced no text")

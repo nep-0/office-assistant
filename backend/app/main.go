@@ -18,14 +18,15 @@ import (
 )
 
 type app struct {
-	startedAt        time.Time
-	config           config
-	store            *storepkg.Store
-	httpClient       *http.Client
-	chatHTTPClient   *http.Client
-	chunkingStrategy ingestionpkg.ChunkingStrategy
-	vectorIndex      *search.VectorIndex
-	activeChats      *chatpkg.CancelRegistry
+	startedAt          time.Time
+	config             config
+	store              *storepkg.Store
+	httpClient         *http.Client
+	documentHTTPClient *http.Client
+	chatHTTPClient     *http.Client
+	chunkingStrategy   ingestionpkg.ChunkingStrategy
+	vectorIndex        *search.VectorIndex
+	activeChats        *chatpkg.CancelRegistry
 }
 
 type config struct {
@@ -77,6 +78,9 @@ func Run() {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		documentHTTPClient: &http.Client{
+			Timeout: defaultDocumentRequestTimeout,
+		},
 		chatHTTPClient: &http.Client{},
 	}
 	vectorIndex, err := search.NewVectorIndex(a.embeddingFunc(), cfg.storageRoot)
@@ -102,6 +106,10 @@ func Run() {
 }
 
 func (a *app) documentLifecycle() docpkg.Lifecycle {
+	documentClient := a.documentHTTPClient
+	if documentClient == nil {
+		documentClient = a.httpClient
+	}
 	return docpkg.Lifecycle{
 		Store: a.store,
 		Storage: docpkg.LocalStorage{
@@ -109,7 +117,7 @@ func (a *app) documentLifecycle() docpkg.Lifecycle {
 			NewToken: randomToken,
 		},
 		Extractor: docpkg.DocumentExtractor{
-			Client:      a.httpClient,
+			Client:      documentClient,
 			DocumentURL: a.config.documentURL,
 			StorageRoot: a.config.storageRoot,
 		},
@@ -165,7 +173,10 @@ func loadConfig() config {
 	}
 }
 
-const defaultChatRequestTimeout = 10 * time.Minute
+const (
+	defaultChatRequestTimeout     = 10 * time.Minute
+	defaultDocumentRequestTimeout = 10 * time.Minute
+)
 
 func durationEnv(key string, fallback time.Duration) time.Duration {
 	raw := utils.Env(key, "")

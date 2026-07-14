@@ -58,7 +58,8 @@ func ExtractDocument(ctx context.Context, client *http.Client, documentURL, stor
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return ExtractionPackage{}, UnexpectedStatus(res.Status)
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+		return ExtractionPackage{}, UnexpectedStatus{Status: res.Status, Message: serviceErrorMessage(body)}
 	}
 
 	var pkg ExtractionPackage
@@ -77,8 +78,29 @@ func WriteExtractedMarkdown(storageRoot string, doc domain.DocumentRecord, markd
 	return markdownKey, os.WriteFile(fullPath, []byte(markdown), 0o644)
 }
 
-type UnexpectedStatus string
+type UnexpectedStatus struct {
+	Status  string
+	Message string
+}
 
 func (err UnexpectedStatus) Error() string {
-	return "document service returned " + string(err)
+	message := "document service returned " + err.Status
+	if err.Message != "" {
+		message += ": " + err.Message
+	}
+	return message
+}
+
+func serviceErrorMessage(body []byte) string {
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &payload) == nil {
+		if payload.Message != "" {
+			return payload.Message
+		}
+		return payload.Code
+	}
+	return ""
 }
