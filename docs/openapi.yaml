@@ -1007,7 +1007,7 @@ components:
           format: int64
         role:
           type: string
-          enum: [user, assistant, tool, error]
+          enum: [user, assistant, error]
         content:
           type: string
         citations:

@@ -160,7 +160,7 @@ func scanChatSession(row rowScanner) (ChatSession, error) {
 func scanChatMessage(row rowScanner) (ChatMessage, error) {
 	var msg ChatMessage
 	var createdAt string
-	if err := row.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.Metadata, &createdAt); err != nil {
+	if err := row.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.ToolCallsJSON, &msg.ToolCallID, &msg.Metadata, &createdAt); err != nil {
 		return ChatMessage{}, err
 	}
 	created, err := parseSQLiteTime(createdAt)

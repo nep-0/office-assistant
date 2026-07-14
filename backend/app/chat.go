@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,16 +17,14 @@ import (
 	"office-assistant/backend/providers"
 	"office-assistant/backend/utils"
 
-	"google.golang.org/adk/v2/model"
-	"google.golang.org/genai"
+	"github.com/nep-0/harness/agent"
 )
 
 const (
-	chatAppName       = "office-assistant"
-	retrievalToolName = "retrieve_knowledge"
 	maxRetrievalLimit = 5
 	vectorProbeLimit  = 20
-	chatHistoryLimit  = 12
+	maxHarnessTurns   = 3
+	modelContextTurns = 6
 )
 
 type chatRequest struct {
@@ -111,6 +110,9 @@ func (a *app) getChatSession(w http.ResponseWriter, r *http.Request) {
 		Messages: make([]chatMessageResponse, 0, len(messages)),
 	}
 	for _, msg := range messages {
+		if !chatpkg.IsVisibleMessage(msg) {
+			continue
+		}
 		res.Messages = append(res.Messages, toChatMessageResponse(msg))
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -175,35 +177,48 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 		emit("error", httpapi.APIError{Code: "store_error", Message: "could not load chat history"})
 		return
 	}
-	if err := a.store.AppendChatMessage(ctx, domain.ChatMessage{SessionID: sessionRecord.ID, Role: "user", Content: req.Message, Metadata: "{}"}); err != nil {
-		emit("error", httpapi.APIError{Code: "store_error", Message: "could not save chat message"})
-		return
-	}
 	emit("start", map[string]any{"session_id": sessionRecord.ID})
 
-	answer, evidence, retrievalCalled, err := a.runKnowledgeBaseAgent(ctx, current, kb, sessionRecord.ID, req.Message, history, emit)
+	result, err := a.runKnowledgeBaseAgent(ctx, kb, sessionRecord.ID, req.Message, history, emit)
+	if err != nil {
+		result.NewMessages = chatpkg.WithoutFinalAssistant(result.NewMessages)
+	}
+	if err == nil && result.RetrievalCalled && len(result.Evidence) == 0 {
+		result.Answer = unsupportedAnswerMessage()
+		for index := len(result.NewMessages) - 1; index >= 0; index-- {
+			if result.NewMessages[index].Role == agent.RoleAssistant && len(result.NewMessages[index].ToolCalls) == 0 {
+				result.NewMessages[index].Content = result.Answer
+				break
+			}
+		}
+	}
+	persisted, persistErr := chatpkg.PersistedMessages(sessionRecord.ID, result.NewMessages, result.Evidence)
+	if persistErr != nil {
+		emit("error", httpapi.APIError{Code: "store_error", Message: "could not encode chat transcript"})
+		return
+	}
 	if err != nil {
 		code := "chat_error"
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			code = "chat_cancelled"
 		}
-		_ = a.store.AppendChatMessage(context.Background(), domain.ChatMessage{SessionID: sessionRecord.ID, Role: "error", Content: err.Error(), Metadata: "{}"})
+		persisted = append(persisted, domain.ChatMessage{SessionID: sessionRecord.ID, Role: "error", Content: err.Error(), ToolCallsJSON: "[]", Metadata: "{}"})
+		if storeErr := a.store.AppendChatMessages(context.Background(), persisted); storeErr != nil {
+			emit("error", httpapi.APIError{Code: "store_error", Message: "could not save failed chat transcript"})
+			return
+		}
 		emit("error", httpapi.APIError{Code: code, Message: err.Error()})
 		return
 	}
-	if !retrievalCalled {
-		evidence = nil
+	if !result.RetrievalCalled {
+		result.Evidence = nil
 	}
-	if len(evidence) == 0 && retrievalCalled {
-		answer = unsupportedAnswerMessage()
-	}
-	_ = a.store.RecordMetric(context.Background(), "chat_token_estimate", 0, int64(ingestionpkg.EstimatedTokenCount(req.Message)+ingestionpkg.EstimatedTokenCount(answer)), map[string]any{"session_id": sessionRecord.ID})
-	metadata, _ := json.Marshal(map[string]any{"citations": evidence})
-	if err := a.store.AppendChatMessage(context.Background(), domain.ChatMessage{SessionID: sessionRecord.ID, Role: "assistant", Content: answer, Metadata: string(metadata)}); err != nil {
-		emit("error", httpapi.APIError{Code: "store_error", Message: "could not save assistant message"})
+	if err := a.store.AppendChatMessages(context.Background(), persisted); err != nil {
+		emit("error", httpapi.APIError{Code: "store_error", Message: "could not save chat transcript"})
 		return
 	}
-	emit("citations", map[string]any{"citations": evidence})
+	_ = a.store.RecordMetric(context.Background(), "chat_token_estimate", 0, int64(ingestionpkg.EstimatedTokenCount(req.Message)+ingestionpkg.EstimatedTokenCount(result.Answer)), map[string]any{"session_id": sessionRecord.ID})
+	emit("citations", map[string]any{"citations": result.Evidence})
 	emit("done", map[string]any{"session_id": sessionRecord.ID})
 }
 
@@ -267,42 +282,52 @@ func (a *app) resolveChatSession(ctx context.Context, current domain.User, kb do
 	return chatpkg.ResolveSession(ctx, a.store, current, kb, req.SessionID, req.Message, randomToken)
 }
 
-func (a *app) runKnowledgeBaseAgent(ctx context.Context, current domain.User, kb domain.KnowledgeBase, sessionID, message string, history []domain.ChatMessage, emit func(string, any)) (string, []chatpkg.RetrievalEvidence, bool, error) {
-	runner := chatpkg.Runner{
-		AppName:           chatAppName,
-		RetrievalToolName: retrievalToolName,
-		MaxRetrievalLimit: maxRetrievalLimit,
+func (a *app) runKnowledgeBaseAgent(ctx context.Context, kb domain.KnowledgeBase, sessionID, message string, history []domain.ChatMessage, emit func(string, any)) (chatpkg.RunResult, error) {
+	setting, err := a.store.FindProviderSetting(ctx, providerPurposeChat)
+	if err != nil {
+		return chatpkg.RunResult{}, err
 	}
-	result, err := runner.Run(ctx, chatpkg.RunRequest{
-		Current:   current,
-		KB:        kb,
-		SessionID: sessionID,
-		Message:   message,
-	}, chatpkg.RunDeps{
-		LoadHistory: func(context.Context, string) ([]domain.ChatMessage, error) {
-			return history, nil
+	client := a.chatClient()
+	if a.config.fakeProviders && strings.Contains(setting.BaseURL, "/fake-openai") {
+		client = providers.FakeChatHTTPClient()
+	}
+	correlation := correlationID(ctx)
+	started := time.Now()
+	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_started", correlation, sessionID)
+	result, err := chatpkg.Run(ctx, chatpkg.RunRequest{
+		Provider:     setting,
+		HTTPClient:   client,
+		Instruction:  knowledgeBaseInstruction(kb),
+		History:      history,
+		Message:      message,
+		MaxTurns:     maxHarnessTurns,
+		ContextTurns: modelContextTurns,
+		Retrieve: func(ctx context.Context, args chatpkg.RetrievalToolArgs) (chatpkg.RetrievalToolResult, error) {
+			return a.retrieveKnowledge(ctx, kb, args)
 		},
-		Retrieve: a.retrieveKnowledge,
-		Model: func(ctx context.Context) (model.LLM, error) {
-			setting, err := a.store.FindProviderSetting(ctx, providerPurposeChat)
-			if err != nil {
-				return nil, err
-			}
-			return providers.ChatModel(setting, a.config.fakeProviders, a.chatClient(), retrievalToolName, maxRetrievalLimit)
+		OnTextDelta: func(text string) {
+			emit("delta", map[string]any{"text": text})
 		},
-		RecordPrompt: func(ctx context.Context, kb domain.KnowledgeBase, sessionID, prompt string) {
+		OnRetrieval: func(args chatpkg.RetrievalToolArgs) {
+			emit("retrieval", map[string]any{"query": args.Query})
+		},
+		OnPrompt: func(prompt agent.Transcript) {
 			if !a.debugEnabled(ctx) {
 				return
 			}
 			_ = a.store.PruneDebugTraces(ctx, time.Now())
 			_ = a.store.AppendDebugTrace(ctx, correlationID(ctx), "chat_prompt", map[string]any{"session_id": sessionID, "knowledge_base_id": kb.ID, "prompt": prompt}, debugTraceRetention)
 		},
-		RecordGeneration: func(ctx context.Context, kb domain.KnowledgeBase, sessionID string, duration time.Duration) {
+		OnGeneration: func(duration time.Duration) {
 			_ = a.store.RecordMetric(ctx, "generation_latency", duration, 1, map[string]any{"session_id": sessionID, "knowledge_base_id": kb.ID})
 		},
-		CorrelationID: correlationID,
-	}, emit)
-	return result.Answer, result.Evidence, result.RetrievalCalled, err
+	})
+	if err != nil {
+		log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_error error=%q", correlation, sessionID, err.Error())
+		return result, err
+	}
+	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_completed duration_ms=%d", correlation, sessionID, time.Since(started).Milliseconds())
+	return result, nil
 }
 
 func (a *app) retrieveKnowledge(ctx context.Context, kb domain.KnowledgeBase, args chatpkg.RetrievalToolArgs) (chatpkg.RetrievalToolResult, error) {
@@ -341,14 +366,6 @@ func (a *app) retrieveKnowledge(ctx context.Context, kb domain.KnowledgeBase, ar
 		_ = a.store.AppendDebugTrace(ctx, correlationID(ctx), "retrieval", map[string]any{"knowledge_base_id": kb.ID, "query": query, "result_count": len(out.Results)}, debugTraceRetention)
 	}
 	return out, nil
-}
-
-func (a *app) promptWithHistory(ctx context.Context, sessionID, message string) (string, error) {
-	messages, err := a.store.ListChatMessages(ctx, sessionID, chatHistoryLimit)
-	if err != nil {
-		return "", err
-	}
-	return chatpkg.PromptWithHistory(messages, message), nil
 }
 
 func knowledgeBaseInstruction(kb domain.KnowledgeBase) string {
@@ -394,10 +411,6 @@ func (a *app) findPersistedCitation(ctx context.Context, sessionID, citationID s
 	}
 	citation, ok := chatpkg.FindPersistedCitation(messages, citationID)
 	return citation, ok, nil
-}
-
-func visibleText(content *genai.Content) string {
-	return chatpkg.VisibleText(content)
 }
 
 func (a *app) registerChatCancel(sessionID string, cancel context.CancelFunc) {

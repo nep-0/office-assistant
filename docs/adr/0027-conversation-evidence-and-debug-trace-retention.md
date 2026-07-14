@@ -1,4 +1,3 @@
 # Conversation Evidence And Debug Trace Retention
 
-The system permanently stores user-visible conversations, final answers, citation evidence, and metadata needed to review document-grounded answers later. Detailed prompts, raw tool traces, and provider internals are stored only when debug mode is enabled, with bounded retention so development and evaluation remain inspectable without making verbose agent traces part of normal product data.
-
+The system permanently stores the canonical conversation transcript: user messages, assistant tool calls, constrained retrieval tool results, final answers, citation evidence, and metadata needed for valid multi-turn model context and later review. Ordinary chat APIs expose only user messages, final assistant messages, errors, and citations. Detailed prompts, retrieval scores, provider events, and other verbose execution traces are stored only when debug mode is enabled, with bounded retention.

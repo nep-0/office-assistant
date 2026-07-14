@@ -44,7 +44,8 @@ This roadmap turns the settled architecture decisions into an implementation seq
 
 ## Phase 6: Agentic Chat
 
-- Embed `google.golang.org/adk` inside the backend application rather than making it the whole server.
+- Embed `github.com/nep-0/harness` inside the backend application for streamed OpenAI-compatible tool execution.
+- Persist the canonical harness transcript in SQLite, including assistant tool calls and tool results, while keeping internal tool messages out of ordinary UI responses.
 - Use one OpenAI-compatible model API path for cloud and local providers.
 - Implement multi-turn chat where retrieval is a constrained backend tool.
 - Require retrieval for knowledge-base answers, enforce backend-controlled tool scope, and persist citation evidence.
@@ -73,4 +74,3 @@ This roadmap turns the settled architecture decisions into an implementation seq
 - Focus on two primary comparisons: chunking strategy and retrieval strategy.
 - Run a documented offline smoke test with local models, cloud settings disabled, and internet disconnected or blocked.
 - Write lightweight third-party attribution and final runbook documentation.
-

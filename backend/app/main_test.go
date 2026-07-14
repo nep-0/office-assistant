@@ -26,6 +26,8 @@ import (
 	"office-assistant/backend/providers"
 	"office-assistant/backend/search"
 	"office-assistant/backend/utils"
+
+	"github.com/nep-0/harness/agent"
 )
 
 func TestHealth(t *testing.T) {
@@ -952,6 +954,35 @@ func TestChatSessionAPIsListDetailAndDeleteOwnedSessions(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseChatContinuesCanonicalHarnessTranscript(t *testing.T) {
+	a := newTestApp(t)
+	cookie := loginAs(t, a, "member", authpkg.RoleMember)
+	kb := createKnowledgeBaseForTest(t, a, cookie, "Policies")
+	insertIndexedDocumentForTest(t, a, kb.ID, "policy.pdf", "Remote work requires manager approval.")
+
+	first := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"message":"What is the remote work policy?"}`, cookie)
+	firstEvents := parseSSEEvents(t, first.Body.String())
+	sessionID := mustSessionIDFromEvents(t, firstEvents)
+	second := performJSONWithCookie(t, a, http.MethodPost, "/api/knowledge-bases/"+strconv.FormatInt(kb.ID, 10)+"/chat", `{"session_id":"`+sessionID+`","message":"What approval is required?"}`, cookie)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second chat: %d %s", second.Code, second.Body.String())
+	}
+	secondEvents := parseSSEEvents(t, second.Body.String())
+	if len(secondEvents["retrieval"]) == 0 || len(secondEvents["done"]) == 0 {
+		t.Fatalf("expected retrieval and completion, got %+v", secondEvents)
+	}
+	transcript, err := a.store.ListAllChatMessages(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != 8 {
+		t.Fatalf("expected two four-message harness turns, got %#v", transcript)
+	}
+	if transcript[1].ToolCallsJSON == "[]" || transcript[2].Role != "tool" || transcript[6].Role != "tool" {
+		t.Fatalf("canonical transcript not persisted: %#v", transcript)
+	}
+}
+
 func TestKnowledgeBaseChatRetrievalScopeIsSelectedKnowledgeBase(t *testing.T) {
 	a := newTestApp(t)
 	cookie := loginAs(t, a, "member", authpkg.RoleMember)
@@ -1166,48 +1197,22 @@ func TestOpenRouterProviderIntegration(t *testing.T) {
 		t.Fatal("expected embedding vector")
 	}
 
-	payload := map[string]any{
-		"model": chatModel,
-		"messages": []map[string]string{
-			{"role": "user", "content": "Reply with exactly: ok"},
-		},
-		"max_tokens": 8,
-	}
-	data, err := json.Marshal(payload)
+	runner, err := agent.NewRunner(
+		agent.WithAPIKey(apiKey),
+		agent.WithBaseURL(baseURL),
+		agent.WithModel(chatModel),
+		agent.WithHTTPClient(a.chatClient()),
+		agent.WithMaxTurns(1),
+	)
 	if err != nil {
-		t.Fatalf("marshal chat payload: %v", err)
+		t.Fatalf("create real chat runner: %v", err)
 	}
-	endpoint, err := providers.JoinProviderPath(baseURL, "chat/completions")
+	snapshot, err := runner.RunTurn(context.Background(), agent.RunSnapshot{}, []agent.Message{{Role: agent.RoleUser, Content: "Reply with exactly: ok"}})
 	if err != nil {
-		t.Fatalf("chat endpoint: %v", err)
+		t.Fatalf("real harness chat request: %v", err)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("new chat request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("real chat request: %v", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		t.Fatalf("chat provider returned %s: %s", res.Status, strings.TrimSpace(string(body)))
-	}
-	var decoded struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(io.LimitReader(res.Body, 2<<20)).Decode(&decoded); err != nil {
-		t.Fatalf("decode chat response: %v", err)
-	}
-	if len(decoded.Choices) == 0 {
-		t.Fatalf("expected at least one chat choice, got %+v", decoded.Choices)
+	if len(snapshot.Transcript) == 0 || strings.TrimSpace(snapshot.Transcript[len(snapshot.Transcript)-1].Content) == "" {
+		t.Fatalf("expected harness assistant response, got %+v", snapshot.Transcript)
 	}
 }
 

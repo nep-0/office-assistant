@@ -74,20 +74,41 @@ func (s *Store) DeleteChatSession(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
-func (s *Store) AppendChatMessage(ctx context.Context, msg ChatMessage) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO chat_messages (session_id, role, content, metadata_json)
-VALUES (?, ?, ?, ?)
-`, msg.SessionID, msg.Role, msg.Content, msg.Metadata)
+func (s *Store) AppendChatMessages(ctx context.Context, messages []ChatMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	defer tx.Rollback()
+	for _, msg := range messages {
+		if msg.SessionID != messages[0].SessionID {
+			return errors.New("chat transcript batch contains multiple sessions")
+		}
+		if msg.ToolCallsJSON == "" {
+			msg.ToolCallsJSON = "[]"
+		}
+		if msg.Metadata == "" {
+			msg.Metadata = "{}"
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO chat_messages (session_id, role, content, tool_calls_json, tool_call_id, metadata_json)
+VALUES (?, ?, ?, ?, ?, ?)
+`, msg.SessionID, msg.Role, msg.Content, msg.ToolCallsJSON, msg.ToolCallID, msg.Metadata); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
 UPDATE chat_sessions
 SET updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
-`, msg.SessionID)
-	return err
+`, messages[0].SessionID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit int) ([]ChatMessage, error) {
@@ -95,9 +116,9 @@ func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit in
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, session_id, role, content, metadata_json, created_at
+SELECT id, session_id, role, content, tool_calls_json, tool_call_id, metadata_json, created_at
 FROM (
-	SELECT id, session_id, role, content, metadata_json, created_at
+	SELECT id, session_id, role, content, tool_calls_json, tool_call_id, metadata_json, created_at
 	FROM chat_messages
 	WHERE session_id = ?
 	ORDER BY id DESC
@@ -122,7 +143,7 @@ ORDER BY id ASC
 
 func (s *Store) ListAllChatMessages(ctx context.Context, sessionID string) ([]ChatMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, session_id, role, content, metadata_json, created_at
+SELECT id, session_id, role, content, tool_calls_json, tool_call_id, metadata_json, created_at
 FROM chat_messages
 WHERE session_id = ?
 ORDER BY id ASC

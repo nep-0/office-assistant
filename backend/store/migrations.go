@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 	session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
 	role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'error')),
 	content TEXT NOT NULL,
+	tool_calls_json TEXT NOT NULL DEFAULT '[]',
+	tool_call_id TEXT NOT NULL DEFAULT '',
 	metadata_json TEXT NOT NULL DEFAULT '{}',
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -198,7 +200,13 @@ CREATE INDEX IF NOT EXISTS debug_traces_expires_idx ON debug_traces(expires_at);
 	if err := s.ensureColumn("document_versions", "indexing_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
 		return err
 	}
-	return s.ensureColumn("document_versions", "embedding_model", "TEXT NOT NULL DEFAULT ''")
+	if err := s.ensureColumn("document_versions", "embedding_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("chat_messages", "tool_calls_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	return s.ensureColumn("chat_messages", "tool_call_id", "TEXT NOT NULL DEFAULT ''")
 }
 
 func (s *Store) ensureColumn(table, column, definition string) error {

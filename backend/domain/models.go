@@ -93,12 +93,14 @@ type ChatSession struct {
 }
 
 type ChatMessage struct {
-	ID        int64
-	SessionID string
-	Role      string
-	Content   string
-	Metadata  string
-	CreatedAt time.Time
+	ID            int64
+	SessionID     string
+	Role          string
+	Content       string
+	ToolCallsJSON string
+	ToolCallID    string
+	Metadata      string
+	CreatedAt     time.Time
 }
 
 type RetrievalChunk struct {

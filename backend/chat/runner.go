@@ -2,154 +2,174 @@ package chat
 
 import (
 	"context"
-	"log"
-	"strconv"
-	"strings"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
 	"time"
 
 	"office-assistant/backend/domain"
 
-	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/agent/llmagent"
-	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/runner"
-	adksession "google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/tool"
-	"google.golang.org/adk/v2/tool/functiontool"
-	"google.golang.org/genai"
+	"github.com/nep-0/harness/agent"
+	"github.com/nep-0/harness/middleware"
 )
 
-type Emitter func(event string, payload any)
+const RetrievalToolName = "retrieve_knowledge"
 
-type Runner struct {
-	AppName           string
-	RetrievalToolName string
-	MaxRetrievalLimit int
-}
-
-const knowledgeBaseAgentName = "knowledge_base_assistant"
+var retrievalToolSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Focused search query proposed by the model."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Optional desired result count. The backend enforces a maximum.",
+      "minimum": 1
+    }
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}`)
 
 type RunRequest struct {
-	Current   domain.User
-	KB        domain.KnowledgeBase
-	SessionID string
-	Message   string
-}
-
-type RunDeps struct {
-	LoadHistory      func(context.Context, string) ([]domain.ChatMessage, error)
-	Retrieve         func(context.Context, domain.KnowledgeBase, RetrievalToolArgs) (RetrievalToolResult, error)
-	Model            func(context.Context) (model.LLM, error)
-	RecordPrompt     func(context.Context, domain.KnowledgeBase, string, string)
-	RecordGeneration func(context.Context, domain.KnowledgeBase, string, time.Duration)
-	CorrelationID    func(context.Context) string
+	Provider     domain.ProviderSetting
+	HTTPClient   *http.Client
+	Instruction  string
+	History      []domain.ChatMessage
+	Message      string
+	MaxTurns     int
+	ContextTurns int
+	Retrieve     func(context.Context, RetrievalToolArgs) (RetrievalToolResult, error)
+	OnTextDelta  func(string)
+	OnRetrieval  func(RetrievalToolArgs)
+	OnPrompt     func(agent.Transcript)
+	OnGeneration func(time.Duration)
 }
 
 type RunResult struct {
+	Transcript      agent.Transcript
+	NewMessages     agent.Transcript
 	Answer          string
 	Evidence        []RetrievalEvidence
 	RetrievalCalled bool
 }
 
-func (r Runner) Run(ctx context.Context, req RunRequest, deps RunDeps, emit Emitter) (RunResult, error) {
-	generationStarted := time.Now()
+func Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if req.Retrieve == nil {
+		return RunResult{}, errors.New("chat: retrieval handler is required")
+	}
+	window, err := middleware.NewSlidingWindow(req.ContextTurns)
+	if err != nil {
+		return RunResult{}, err
+	}
+	base := TranscriptFromMessages(req.History)
+	modelTranscript := make(agent.Transcript, 0, len(base)+1)
+	modelTranscript = append(modelTranscript, agent.Message{Role: agent.RoleDeveloper, Content: req.Instruction})
+	modelTranscript = append(modelTranscript, base...)
+	if req.OnPrompt != nil {
+		prompt := append(agent.Transcript(nil), modelTranscript...)
+		prompt = append(prompt, agent.Message{Role: agent.RoleUser, Content: req.Message})
+		prompt, err = window.Context(ctx, prompt)
+		if err != nil {
+			return RunResult{}, err
+		}
+		req.OnPrompt(prompt)
+	}
+
+	var stateMu sync.Mutex
+	var callbackMu sync.Mutex
 	var evidence []RetrievalEvidence
 	retrievalCalled := false
 	var retrievalErr error
-
-	retrievalTool, err := functiontool.New(functiontool.Config{
-		Name:        r.RetrievalToolName,
+	tool := agent.Tool{
+		Name:        RetrievalToolName,
 		Description: "Searches the selected Knowledge Base. The backend enforces scope, permissions, limits, and citation metadata.",
-	}, func(toolCtx agent.Context, args RetrievalToolArgs) (RetrievalToolResult, error) {
-		retrievalCalled = true
-		emit("retrieval", map[string]any{"query": args.Query})
-		result, err := deps.Retrieve(ctx, req.KB, args)
-		if err != nil {
-			retrievalErr = err
-			return RetrievalToolResult{}, err
-		}
-		evidence = append(evidence, result.Results...)
-		return result, nil
-	})
+		Parameters:  retrievalToolSchema,
+		Handler: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			var args RetrievalToolArgs
+			if err := json.Unmarshal(raw, &args); err != nil {
+				return "", err
+			}
+			stateMu.Lock()
+			retrievalCalled = true
+			stateMu.Unlock()
+			if req.OnRetrieval != nil {
+				callbackMu.Lock()
+				req.OnRetrieval(args)
+				callbackMu.Unlock()
+			}
+			result, err := req.Retrieve(ctx, args)
+			if err != nil {
+				stateMu.Lock()
+				if retrievalErr == nil {
+					retrievalErr = err
+				}
+				stateMu.Unlock()
+				return "", err
+			}
+			stateMu.Lock()
+			for index := range result.Results {
+				result.Results[index].CitationID = fmt.Sprintf("c%d", len(evidence)+index+1)
+			}
+			evidence = append(evidence, result.Results...)
+			stateMu.Unlock()
+			encoded, err := json.Marshal(result)
+			return string(encoded), err
+		},
+	}
+
+	runner, err := agent.NewRunner(
+		agent.WithAPIKey(req.Provider.APIKey),
+		agent.WithBaseURL(req.Provider.BaseURL),
+		agent.WithModel(req.Provider.Model),
+		agent.WithHTTPClient(req.HTTPClient),
+		agent.WithMaxTurns(req.MaxTurns),
+		agent.WithMiddleware(window),
+		agent.WithTool(tool),
+		agent.WithEventHandler(func(event agent.Event) error {
+			if event.Type == agent.EventTextDelta && req.OnTextDelta != nil {
+				req.OnTextDelta(event.Delta)
+			}
+			return nil
+		}),
+	)
 	if err != nil {
 		return RunResult{}, err
 	}
 
-	modelInstance, err := deps.Model(ctx)
-	if err != nil {
-		return RunResult{}, err
+	started := time.Now()
+	snapshot, runErr := runner.RunTurn(ctx, agent.RunSnapshot{Transcript: modelTranscript}, []agent.Message{{Role: agent.RoleUser, Content: req.Message}})
+	if req.OnGeneration != nil {
+		req.OnGeneration(time.Since(started))
 	}
-	adkAgent, err := llmagent.New(llmagent.Config{
-		Name:        knowledgeBaseAgentName,
-		Model:       modelInstance,
-		Description: "Answers questions from a selected Knowledge Base.",
-		Instruction: KnowledgeBaseInstruction(req.KB),
-		Tools:       []tool.Tool{retrievalTool},
-	})
-	if err != nil {
-		return RunResult{}, err
+	newStart := len(modelTranscript)
+	if newStart > len(snapshot.Transcript) {
+		newStart = len(snapshot.Transcript)
 	}
-	sessionService := adksession.InMemoryService()
-	runnr, err := runner.New(runner.Config{
-		AppName:           r.AppName,
-		Agent:             adkAgent,
-		SessionService:    sessionService,
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		return RunResult{}, err
+	newMessages := append(agent.Transcript(nil), snapshot.Transcript[newStart:]...)
+	result := RunResult{
+		Transcript:  snapshot.Transcript,
+		NewMessages: newMessages,
 	}
-
-	history, err := deps.LoadHistory(ctx, req.SessionID)
-	if err != nil {
-		return RunResult{}, err
-	}
-	userID := strconv.FormatInt(req.Current.ID, 10)
-	if err := SeedADKSession(ctx, sessionService, r.AppName, userID, req.SessionID, knowledgeBaseAgentName, history); err != nil {
-		return RunResult{}, err
-	}
-	if deps.RecordPrompt != nil {
-		deps.RecordPrompt(ctx, req.KB, req.SessionID, RenderStructuredHistoryForDebug(history, req.Message))
-	}
-
-	userMessage := genai.NewContentFromText(req.Message, genai.RoleUser)
-	var answer strings.Builder
-	sawPartial := false
-	correlationID := ""
-	if deps.CorrelationID != nil {
-		correlationID = deps.CorrelationID(ctx)
-	}
-	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_started", correlationID, req.SessionID)
-	for event, err := range runnr.Run(ctx, userID, req.SessionID, userMessage, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
-		if err != nil {
-			log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_error error=%q", correlationID, req.SessionID, err.Error())
-			return RunResult{Evidence: evidence, RetrievalCalled: retrievalCalled}, err
-		}
-		if event == nil || event.Content == nil {
-			continue
-		}
-		text := VisibleText(event.Content)
-		if text == "" {
-			continue
-		}
-		if event.Partial {
-			sawPartial = true
-			answer.WriteString(text)
-			emit("delta", map[string]any{"text": text})
-			continue
-		}
-		if !sawPartial {
-			answer.WriteString(text)
-			emit("delta", map[string]any{"text": text})
+	stateMu.Lock()
+	result.Evidence = append([]RetrievalEvidence(nil), evidence...)
+	result.RetrievalCalled = retrievalCalled
+	capturedRetrievalErr := retrievalErr
+	stateMu.Unlock()
+	for i := len(newMessages) - 1; i >= 0; i-- {
+		if newMessages[i].Role == agent.RoleAssistant && len(newMessages[i].ToolCalls) == 0 {
+			result.Answer = newMessages[i].Content
+			break
 		}
 	}
-	if retrievalErr != nil {
-		return RunResult{Evidence: evidence, RetrievalCalled: retrievalCalled}, retrievalErr
+	if runErr != nil {
+		return result, runErr
 	}
-	duration := time.Since(generationStarted)
-	if deps.RecordGeneration != nil {
-		deps.RecordGeneration(ctx, req.KB, req.SessionID, duration)
+	if capturedRetrievalErr != nil {
+		return result, capturedRetrievalErr
 	}
-	log.Printf("correlation_id=%s provider=chat session_id=%s event=provider_call_completed duration_ms=%d", correlationID, req.SessionID, duration.Milliseconds())
-	return RunResult{Answer: answer.String(), Evidence: evidence, RetrievalCalled: retrievalCalled}, nil
+	return result, nil
 }
