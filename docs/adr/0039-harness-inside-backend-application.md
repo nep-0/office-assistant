@@ -7,3 +7,5 @@ SQLite is the canonical conversation store. It persists user messages, assistant
 Internal tool-call and tool-result messages are retained for valid multi-turn model context but are not returned by ordinary chat-session APIs.
 
 The full transcript remains durable in SQLite. Harness's sliding-window context middleware limits each model request to the current turn and five preceding complete turns while preserving the leading developer instruction and complete assistant tool-call/tool-result groups. This is a turn-based initial bound; a token-aware compaction policy can replace it if model context pressure requires one later.
+
+Harness runtime metadata injects the authenticated username and current UTC date into model-facing context without persisting either as transcript messages. A backend middleware then merges all system and developer content into one leading instruction because Qwen-compatible providers accept only one system/developer message.

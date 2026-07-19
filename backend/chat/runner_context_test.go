@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"office-assistant/backend/domain"
@@ -47,6 +48,8 @@ func TestRunLimitsProviderContextWithoutSplittingToolGroups(t *testing.T) {
 		Message:      "current question",
 		MaxTurns:     1,
 		ContextTurns: 6,
+		Username:     "jeff",
+		CurrentDate:  "2026-07-15",
 		Retrieve: func(context.Context, RetrievalToolArgs) (RetrievalToolResult, error) {
 			return RetrievalToolResult{}, nil
 		},
@@ -59,8 +62,19 @@ func TestRunLimitsProviderContextWithoutSplittingToolGroups(t *testing.T) {
 	}
 
 	messages := transport.request.Messages
-	if len(messages) == 0 || messages[0].Role != "developer" || messages[0].Content != "developer instruction" {
+	if len(messages) == 0 || messages[0].Role != "developer" {
 		t.Fatalf("leading instruction was not preserved: %#v", messages)
+	}
+	for _, content := range []string{
+		"developer instruction",
+		`Stable runtime metadata:
+{"username":"jeff"}`,
+		`Volatile runtime metadata:
+{"current_date":"2026-07-15"}`,
+	} {
+		if !strings.Contains(messages[0].Content, content) {
+			t.Fatalf("leading instruction does not contain %q: %q", content, messages[0].Content)
+		}
 	}
 	if messages[len(messages)-1].Role != "user" || messages[len(messages)-1].Content != "current question" {
 		t.Fatalf("current turn was not preserved: %#v", messages)
@@ -68,7 +82,11 @@ func TestRunLimitsProviderContextWithoutSplittingToolGroups(t *testing.T) {
 	var historicalQuestions []string
 	callSeen := false
 	resultSeen := false
+	instructionCount := 0
 	for _, message := range messages {
+		if message.Role == "system" || message.Role == "developer" {
+			instructionCount++
+		}
 		if message.Role == "user" && message.Content != "current question" {
 			historicalQuestions = append(historicalQuestions, message.Content)
 		}
@@ -79,6 +97,9 @@ func TestRunLimitsProviderContextWithoutSplittingToolGroups(t *testing.T) {
 			resultSeen = true
 		}
 	}
+	if instructionCount != 1 {
+		t.Fatalf("provider received %d system/developer messages: %#v", instructionCount, messages)
+	}
 	wantQuestions := []string{"question 3", "question 4", "question 5", "question 6", "question 7"}
 	if !reflect.DeepEqual(historicalQuestions, wantQuestions) {
 		t.Fatalf("historical questions = %#v, want %#v", historicalQuestions, wantQuestions)
@@ -88,6 +109,9 @@ func TestRunLimitsProviderContextWithoutSplittingToolGroups(t *testing.T) {
 	}
 	if len(debugPrompt) != len(messages) {
 		t.Fatalf("debug prompt has %d messages, provider received %d", len(debugPrompt), len(messages))
+	}
+	if debugPrompt[0].Role != agent.RoleDeveloper || debugPrompt[0].Content != messages[0].Content {
+		t.Fatalf("debug instruction differs from provider request: debug=%#v provider=%#v", debugPrompt[0], messages[0])
 	}
 	if len(result.Transcript) != len(historyTranscript)+3 {
 		t.Fatalf("canonical transcript has %d messages, want %d", len(result.Transcript), len(historyTranscript)+3)

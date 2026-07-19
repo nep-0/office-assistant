@@ -179,7 +179,7 @@ func (a *app) chatKnowledgeBase(w http.ResponseWriter, r *http.Request) {
 	}
 	emit("start", map[string]any{"session_id": sessionRecord.ID})
 
-	result, err := a.runKnowledgeBaseAgent(ctx, kb, sessionRecord.ID, req.Message, history, emit)
+	result, err := a.runKnowledgeBaseAgent(ctx, current.Username, kb, sessionRecord.ID, req.Message, history, emit)
 	if err != nil {
 		result.NewMessages = chatpkg.WithoutFinalAssistant(result.NewMessages)
 	}
@@ -282,7 +282,7 @@ func (a *app) resolveChatSession(ctx context.Context, current domain.User, kb do
 	return chatpkg.ResolveSession(ctx, a.store, current, kb, req.SessionID, req.Message, randomToken)
 }
 
-func (a *app) runKnowledgeBaseAgent(ctx context.Context, kb domain.KnowledgeBase, sessionID, message string, history []domain.ChatMessage, emit func(string, any)) (chatpkg.RunResult, error) {
+func (a *app) runKnowledgeBaseAgent(ctx context.Context, username string, kb domain.KnowledgeBase, sessionID, message string, history []domain.ChatMessage, emit func(string, any)) (chatpkg.RunResult, error) {
 	setting, err := a.store.FindProviderSetting(ctx, providerPurposeChat)
 	if err != nil {
 		return chatpkg.RunResult{}, err
@@ -302,6 +302,8 @@ func (a *app) runKnowledgeBaseAgent(ctx context.Context, kb domain.KnowledgeBase
 		Message:      message,
 		MaxTurns:     maxHarnessTurns,
 		ContextTurns: modelContextTurns,
+		Username:     username,
+		CurrentDate:  time.Now().UTC().Format(time.DateOnly),
 		Retrieve: func(ctx context.Context, args chatpkg.RetrievalToolArgs) (chatpkg.RetrievalToolResult, error) {
 			return a.retrieveKnowledge(ctx, kb, args)
 		},

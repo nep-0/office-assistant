@@ -42,6 +42,8 @@ type RunRequest struct {
 	Message      string
 	MaxTurns     int
 	ContextTurns int
+	Username     string
+	CurrentDate  string
 	Retrieve     func(context.Context, RetrievalToolArgs) (RetrievalToolResult, error)
 	OnTextDelta  func(string)
 	OnRetrieval  func(RetrievalToolArgs)
@@ -65,6 +67,21 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	runtimeMetadata := middleware.NewRuntimeMetadata(
+		func(context.Context) (map[string]any, error) {
+			if req.Username == "" {
+				return nil, nil
+			}
+			return map[string]any{"username": req.Username}, nil
+		},
+		func(context.Context) (map[string]any, error) {
+			if req.CurrentDate == "" {
+				return nil, nil
+			}
+			return map[string]any{"current_date": req.CurrentDate}, nil
+		},
+	)
+	mergeInstructions := MergeInstructions{}
 	base := TranscriptFromMessages(req.History)
 	modelTranscript := make(agent.Transcript, 0, len(base)+1)
 	modelTranscript = append(modelTranscript, agent.Message{Role: agent.RoleDeveloper, Content: req.Instruction})
@@ -72,9 +89,11 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if req.OnPrompt != nil {
 		prompt := append(agent.Transcript(nil), modelTranscript...)
 		prompt = append(prompt, agent.Message{Role: agent.RoleUser, Content: req.Message})
-		prompt, err = window.Context(ctx, prompt)
-		if err != nil {
-			return RunResult{}, err
+		for _, contextMiddleware := range []agent.ContextMiddleware{window, runtimeMetadata, mergeInstructions} {
+			prompt, err = contextMiddleware.Context(ctx, prompt)
+			if err != nil {
+				return RunResult{}, err
+			}
 		}
 		req.OnPrompt(prompt)
 	}
@@ -128,6 +147,8 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		agent.WithHTTPClient(req.HTTPClient),
 		agent.WithMaxTurns(req.MaxTurns),
 		agent.WithMiddleware(window),
+		agent.WithMiddleware(runtimeMetadata),
+		agent.WithMiddleware(mergeInstructions),
 		agent.WithTool(tool),
 		agent.WithEventHandler(func(event agent.Event) error {
 			if event.Type == agent.EventTextDelta && req.OnTextDelta != nil {

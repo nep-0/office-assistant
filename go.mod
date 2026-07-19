@@ -3,7 +3,7 @@ module office-assistant
 go 1.26.0
 
 require (
-	github.com/nep-0/harness v0.1.2
+	github.com/nep-0/harness v0.1.3
 	github.com/philippgille/chromem-go v0.7.0
 	golang.org/x/crypto v0.53.0
 	modernc.org/sqlite v1.53.0
